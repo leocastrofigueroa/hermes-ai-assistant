@@ -507,6 +507,491 @@ def autoriza_creacion_evento_desde_modelo(
 
 
 # ==========================================================
+# COMPRENSIÓN TEMPORAL AVANZADA — DESPLAZAMIENTOS RELATIVOS
+# ==========================================================
+NUMEROS_TEMPORALES = {
+    "un": 1,
+    "una": 1,
+    "uno": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+    "seis": 6,
+    "siete": 7,
+    "ocho": 8,
+    "nueve": 9,
+    "diez": 10,
+    "once": 11,
+    "doce": 12,
+    "trece": 13,
+    "catorce": 14,
+    "quince": 15,
+    "veinte": 20,
+    "treinta": 30,
+    "cuarenta": 40,
+    "cincuenta": 50,
+    "sesenta": 60,
+}
+
+
+def convertir_cantidad_temporal(
+    valor
+):
+    if valor is None:
+        return None
+
+    valor_normalizado = normalizar_texto(
+        str(valor)
+    )
+
+    if valor_normalizado.isdigit():
+        return int(
+            valor_normalizado
+        )
+
+    return NUMEROS_TEMPORALES.get(
+        valor_normalizado
+    )
+
+
+def extraer_momento_relativo(
+    mensaje
+):
+    """
+    Interpreta expresiones como:
+    - dentro de 3 días
+    - en dos días
+    - de acá a 4 días
+    - dentro de 2 horas
+    - en 30 minutos
+
+    Devuelve un datetime futuro o None.
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patron = re.search(
+        r"\b(?:dentro\s+de|en|de\s+aca\s+a)\s+"
+        r"(\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|"
+        r"nueve|diez|once|doce|trece|catorce|quince|veinte|treinta|"
+        r"cuarenta|cincuenta|sesenta)\s+"
+        r"(minuto|minutos|hora|horas|dia|dias)\b",
+        texto
+    )
+
+    if not patron:
+        return None
+
+    cantidad = convertir_cantidad_temporal(
+        patron.group(1)
+    )
+
+    if cantidad is None:
+        return None
+
+    unidad = patron.group(2)
+
+    ahora = datetime.now()
+
+    if unidad.startswith(
+        "minuto"
+    ):
+        return (
+            ahora
+            + timedelta(
+                minutes=cantidad
+            )
+        )
+
+    if unidad.startswith(
+        "hora"
+    ):
+        return (
+            ahora
+            + timedelta(
+                hours=cantidad
+            )
+        )
+
+    return (
+        ahora
+        + timedelta(
+            days=cantidad
+        )
+    )
+
+
+def extraer_fecha_relativa_avanzada(
+    mensaje
+):
+    momento = extraer_momento_relativo(
+        mensaje
+    )
+
+    if momento is None:
+        return None
+
+    return momento.date().isoformat()
+
+
+def extraer_hora_relativa_avanzada(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    momento = extraer_momento_relativo(
+        mensaje
+    )
+
+    if momento is None:
+        return None
+
+    # Para expresiones en días, si además Leo dice una hora explícita,
+    # dejamos que la lógica normal de "a las HH:MM" decida la hora.
+    if re.search(
+        r"\b(?:dentro\s+de|en|de\s+aca\s+a)\s+"
+        r"(?:\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|"
+        r"nueve|diez|once|doce|trece|catorce|quince|veinte|treinta|"
+        r"cuarenta|cincuenta|sesenta)\s+"
+        r"(?:dia|dias)\b",
+        texto
+    ):
+        return None
+
+    return momento.strftime(
+        "%H:%M"
+    )
+
+
+# ==========================================================
+# COMPRENSIÓN TEMPORAL AVANZADA — DÍAS NATURALES
+# ==========================================================
+
+def proxima_fecha_dia_mes(
+    dia_objetivo
+):
+    """
+    Devuelve la próxima fecha futura cuyo día del mes coincide
+    con dia_objetivo. Si ya pasó este mes, busca en el siguiente.
+    """
+
+    hoy = date.today()
+
+    anio = hoy.year
+    mes = hoy.month
+
+    for _ in range(24):
+
+        try:
+            candidata = date(
+                anio,
+                mes,
+                dia_objetivo,
+            )
+
+            if candidata >= hoy:
+                return candidata.isoformat()
+
+        except ValueError:
+            pass
+
+        mes += 1
+
+        if mes > 12:
+            mes = 1
+            anio += 1
+
+    return None
+
+
+def proximo_dia_semana_natural(
+    numero_dia,
+    incluir_hoy=False,
+):
+    hoy = date.today()
+
+    diferencia = (
+        numero_dia
+        - hoy.weekday()
+    ) % 7
+
+    if diferencia == 0 and not incluir_hoy:
+        diferencia = 7
+
+    return (
+        hoy
+        + timedelta(
+            days=diferencia
+        )
+    ).isoformat()
+
+
+def extraer_fecha_natural_avanzada(
+    mensaje
+):
+    """
+    Interpreta expresiones como:
+    - el lunes que viene
+    - el próximo viernes
+    - este sábado
+    - el fin de semana
+    - el 15
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    # "el próximo viernes" / "el viernes que viene"
+    for nombre, numero in DIAS_SEMANA.items():
+
+        if re.search(
+            rf"\b(?:el\s+)?proximo\s+{nombre}\b",
+            texto
+        ):
+
+            return proximo_dia_semana_natural(
+                numero,
+                incluir_hoy=False,
+            )
+
+        if re.search(
+            rf"\b(?:el\s+)?{nombre}\s+que\s+viene\b",
+            texto
+        ):
+
+            return proximo_dia_semana_natural(
+                numero,
+                incluir_hoy=False,
+            )
+
+        # "este sábado": si hoy es sábado, interpreta hoy.
+        if re.search(
+            rf"\beste\s+{nombre}\b",
+            texto
+        ):
+
+            return proximo_dia_semana_natural(
+                numero,
+                incluir_hoy=True,
+            )
+
+    # Para Hermes, "el fin de semana" se interpreta como
+    # el sábado más próximo.
+    if re.search(
+        r"\b(?:el\s+)?fin\s+de\s+semana\b",
+        texto
+    ):
+
+        return proximo_dia_semana_natural(
+            DIAS_SEMANA["sabado"],
+            incluir_hoy=True,
+        )
+
+    # "el 15", "para el 22", etc.
+    coincidencia = re.search(
+        r"\b(?:para\s+)?el\s+(\d{1,2})\b",
+        texto
+    )
+
+    if coincidencia:
+
+        dia_objetivo = int(
+            coincidencia.group(1)
+        )
+
+        if 1 <= dia_objetivo <= 31:
+
+            return proxima_fecha_dia_mes(
+                dia_objetivo
+            )
+
+    return None
+
+
+# ==========================================================
+# COMPRENSIÓN TEMPORAL AVANZADA — PERÍODOS NATURALES
+# ==========================================================
+
+def primer_dia_mes_siguiente(
+    referencia=None
+):
+    referencia = referencia or date.today()
+
+    if referencia.month == 12:
+        return date(
+            referencia.year + 1,
+            1,
+            1,
+        )
+
+    return date(
+        referencia.year,
+        referencia.month + 1,
+        1,
+    )
+
+
+def ultimo_dia_mes(
+    referencia=None
+):
+    referencia = referencia or date.today()
+
+    siguiente = primer_dia_mes_siguiente(
+        referencia
+    )
+
+    return (
+        siguiente
+        - timedelta(
+            days=1
+        )
+    )
+
+
+def fecha_mitad_mes_futura():
+    hoy = date.today()
+
+    candidata = date(
+        hoy.year,
+        hoy.month,
+        15,
+    )
+
+    if candidata >= hoy:
+        return candidata.isoformat()
+
+    siguiente = primer_dia_mes_siguiente(
+        hoy
+    )
+
+    return date(
+        siguiente.year,
+        siguiente.month,
+        15,
+    ).isoformat()
+
+
+def fecha_principio_mes_futura():
+    hoy = date.today()
+
+    if hoy.day == 1:
+        return hoy.isoformat()
+
+    return primer_dia_mes_siguiente(
+        hoy
+    ).isoformat()
+
+
+def fecha_fin_mes_actual():
+    return ultimo_dia_mes(
+        date.today()
+    ).isoformat()
+
+
+def fecha_semana_que_viene():
+    hoy = date.today()
+
+    dias_hasta_lunes = (
+        7 - hoy.weekday()
+    )
+
+    return (
+        hoy
+        + timedelta(
+            days=dias_hasta_lunes
+        )
+    ).isoformat()
+
+
+def fecha_mes_que_viene():
+    """
+    Interpreta "el mes que viene" como el mismo número de día
+    del mes siguiente. Si ese día no existe, usa el último día
+    válido del mes siguiente.
+    """
+
+    hoy = date.today()
+    inicio_siguiente = primer_dia_mes_siguiente(
+        hoy
+    )
+
+    anio = inicio_siguiente.year
+    mes = inicio_siguiente.month
+    dia = hoy.day
+
+    while dia >= 1:
+
+        try:
+            return date(
+                anio,
+                mes,
+                dia,
+            ).isoformat()
+
+        except ValueError:
+            dia -= 1
+
+    return inicio_siguiente.isoformat()
+
+
+def extraer_fecha_periodo_natural(
+    mensaje
+):
+    """
+    Interpreta:
+    - a principio de mes
+    - a mitad de mes
+    - a fin de mes
+    - la semana que viene / la semana próxima
+    - el mes que viene / el próximo mes
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if re.search(
+        r"\b(?:a\s+)?principio\s+de\s+mes\b",
+        texto
+    ):
+        return fecha_principio_mes_futura()
+
+    if re.search(
+        r"\b(?:a\s+)?mitad\s+de\s+mes\b",
+        texto
+    ):
+        return fecha_mitad_mes_futura()
+
+    if re.search(
+        r"\b(?:a\s+)?fin\s+de\s+mes\b",
+        texto
+    ):
+        return fecha_fin_mes_actual()
+
+    if re.search(
+        r"\b(?:la\s+)?semana\s+que\s+viene\b"
+        r"|\b(?:la\s+)?semana\s+proxima\b",
+        texto
+    ):
+        return fecha_semana_que_viene()
+
+    if re.search(
+        r"\b(?:el\s+)?mes\s+que\s+viene\b"
+        r"|\b(?:el\s+)?proximo\s+mes\b",
+        texto
+    ):
+        return fecha_mes_que_viene()
+
+    return None
+
+
+# ==========================================================
 # FECHAS
 # ==========================================================
 
@@ -597,6 +1082,27 @@ def convertir_fecha(texto_fecha):
 def extraer_fecha_del_mensaje(
     mensaje
 ):
+    fecha_relativa = extraer_fecha_relativa_avanzada(
+        mensaje
+    )
+
+    if fecha_relativa:
+        return fecha_relativa
+
+    fecha_periodo = extraer_fecha_periodo_natural(
+        mensaje
+    )
+
+    if fecha_periodo:
+        return fecha_periodo
+
+    fecha_natural = extraer_fecha_natural_avanzada(
+        mensaje
+    )
+
+    if fecha_natural:
+        return fecha_natural
+
     texto = normalizar_texto(
         mensaje
     )
@@ -689,12 +1195,94 @@ def fecha_para_mostrar(
 
 
 # ==========================================================
+# COMPRENSIÓN TEMPORAL AVANZADA — PARTES DEL DÍA
+# ==========================================================
+HORAS_PARTES_DIA = {
+    "manana": "09:00",
+    "mediodia": "12:00",
+    "tarde": "17:00",
+    "noche": "21:00",
+}
+
+
+def extraer_hora_parte_dia(
+    mensaje
+):
+    """
+    Interpreta expresiones vagas de hora usando valores
+    predeterminados consistentes:
+
+    - mañana / por la mañana -> 09:00
+    - mediodía -> 12:00
+    - tarde / por la tarde -> 17:00
+    - noche / por la noche -> 21:00
+
+    La palabra "mañana" como fecha no se confunde con
+    "a la mañana" o "por la mañana".
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        (
+            r"\b(?:a\s+la|por\s+la)\s+manana\b",
+            HORAS_PARTES_DIA["manana"],
+        ),
+        (
+            r"\b(?:al|a\s+el|por\s+el)\s+mediodia\b"
+            r"|\bmediodia\b",
+            HORAS_PARTES_DIA["mediodia"],
+        ),
+        (
+            r"\b(?:a\s+la|por\s+la|esta)\s+tarde\b",
+            HORAS_PARTES_DIA["tarde"],
+        ),
+        (
+            r"\b(?:a\s+la|por\s+la|esta)\s+noche\b",
+            HORAS_PARTES_DIA["noche"],
+        ),
+    )
+
+    for patron, hora in patrones:
+
+        if re.search(
+            patron,
+            texto
+        ):
+            return hora
+
+    return None
+
+
+# ==========================================================
 # HORAS
 # ==========================================================
 
 def extraer_horas_del_mensaje(
     mensaje
 ):
+    hora_relativa = extraer_hora_relativa_avanzada(
+        mensaje
+    )
+
+    if hora_relativa:
+        return (
+            hora_relativa,
+            None,
+        )
+
+    hora_parte_dia = extraer_hora_parte_dia(
+        mensaje
+    )
+
+    if hora_parte_dia:
+        return (
+            hora_parte_dia,
+            None,
+        )
+
     texto = normalizar_texto(
         mensaje
     )
@@ -1070,6 +1658,142 @@ def extraer_todas_las_anticipaciones(
         for _, minutos
         in resultados
     ]
+
+
+def es_creacion_evento_natural(
+    mensaje
+):
+    """
+    Detecta compromisos expresados de forma natural, por ejemplo:
+    "Dentro de 3 días a las 16 tengo una reunión".
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    # "Tengo que..." se reserva para tareas, no para eventos.
+    if re.search(
+        r"\btengo\s+que\b",
+        texto
+    ):
+        return False
+
+    habla_de_compromiso = bool(
+        re.search(
+            r"\b(?:tengo|tenemos)\b",
+            texto
+        )
+    )
+
+    if not habla_de_compromiso:
+        return False
+
+    fecha = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    return (
+        fecha is not None
+        and hora is not None
+    )
+
+
+def extraer_titulo_evento_natural(
+    mensaje
+):
+    texto = mensaje.strip()
+
+    coincidencia = re.search(
+        r"\b(?:tengo|tenemos)\b\s+(.*)$",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    if not coincidencia:
+        return None
+
+    titulo = coincidencia.group(1).strip()
+
+    titulo = re.sub(
+        r"^(?:un|una|el|la)\s+",
+        "",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\s+",
+        " ",
+        titulo,
+    ).strip(" .,-")
+
+    if not titulo:
+        return None
+
+    return (
+        titulo[0].upper()
+        + titulo[1:]
+    )
+
+
+def crear_evento_natural_desde_mensaje(
+    mensaje
+):
+    fecha = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    hora_inicio, hora_fin = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    titulo = extraer_titulo_evento_natural(
+        mensaje
+    )
+
+    if not fecha:
+        return (
+            "Necesito una fecha para crear el evento."
+        )
+
+    if not hora_inicio:
+        return (
+            "Necesito una hora para crear el evento."
+        )
+
+    if not titulo:
+        return (
+            "Entendí cuándo es el evento, pero no qué evento querés agendar."
+        )
+
+    momento = datetime.fromisoformat(
+        f"{fecha}T{hora_inicio}:00"
+    )
+
+    if momento <= datetime.now():
+        return (
+            "Ese momento ya pasó."
+        )
+
+    evento_id = crear_evento(
+        titulo=titulo,
+        fecha=fecha,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+        descripcion="",
+    )
+
+    return (
+        f"Listo. Agregué el evento "
+        f"#{evento_id}: {titulo} para "
+        f"{fecha_para_mostrar(fecha)} "
+        f"a las {hora_inicio}."
+    )
 
 
 # ==========================================================
@@ -1677,6 +2401,17 @@ def extraer_titulo_recordatorio(
     )
 
     texto = re.sub(
+        r"\b(?:dentro\s+de|en|de\s+acá\s+a)\s+"
+        r"(?:\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|"
+        r"nueve|diez|once|doce|trece|catorce|quince|veinte|treinta|"
+        r"cuarenta|cincuenta|sesenta)\s+"
+        r"(?:minuto|minutos|hora|horas|día|dias|días)\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
         r"\b(el\s+)?"
         r"(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)"
         r"\b",
@@ -1686,7 +2421,95 @@ def extraer_titulo_recordatorio(
     )
 
     texto = re.sub(
+        r"\b(?:el\s+)?próximo\s+"
+        r"(?:lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:el\s+)?"
+        r"(?:lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)"
+        r"\s+que\s+viene\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\beste\s+"
+        r"(?:lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:el\s+)?fin\s+de\s+semana\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:para\s+)?el\s+\d{1,2}\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:a\s+)?(?:principio|mitad|fin)\s+de\s+mes\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:la\s+)?semana\s+(?:que\s+viene|próxima|proxima)\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:el\s+)?(?:mes\s+que\s+viene|próximo\s+mes|proximo\s+mes)\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
         r"\ba\s+las?\s+\d{1,2}(?::\d{2})?\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:a\s+la|por\s+la)\s+mañana\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:al|a\s+el|por\s+el)?\s*mediodía\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:a\s+la|por\s+la|esta)\s+tarde\b",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    texto = re.sub(
+        r"\b(?:a\s+la|por\s+la|esta)\s+noche\b",
         "",
         texto,
         flags=re.IGNORECASE
@@ -3332,7 +4155,6 @@ def es_cancelacion_evento(
     )
 
 
-
 def reprogramar_avisos_evento_seguro(
     evento_id,
     fecha_evento,
@@ -4046,7 +4868,6 @@ def agenda_semana():
     )
 
 
-
 # ==========================================================
 # AUDITORÍA DE SINCRONIZACIÓN EVENTO ↔ RECORDATORIOS
 # ==========================================================
@@ -4516,6 +5337,14 @@ def procesar_comandos_directos(
         )
 
     # EVENTOS
+
+    if es_creacion_evento_natural(
+        mensaje
+    ):
+
+        return crear_evento_natural_desde_mensaje(
+            mensaje
+        )
 
     if es_desplazamiento_relativo_evento(
         mensaje
@@ -5035,6 +5864,11 @@ print("⏱️ Edición natural de recordatorios: activa")
 print("↔️ Edición relativa de eventos: activa")
 print("🔄 Sincronización segura evento-aviso: activa")
 print("🧪 Auditoría evento-recordatorios: activa")
+print("🕒 Comprensión temporal relativa: activa")
+print("📅 Creación natural de eventos temporales: activa")
+print("🗓️ Fechas naturales avanzadas: activas")
+print("🌅 Partes del día: activas")
+print("📆 Períodos naturales: activos")
 print()
 print("Escribí 'salir' para terminar.")
 print()
