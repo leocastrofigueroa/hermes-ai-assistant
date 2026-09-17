@@ -1,7 +1,7 @@
 import sqlite3
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 DB_PATH = "hermes.db"
@@ -28,9 +28,30 @@ def crear_tabla_recordatorios():
             fecha_hora TEXT NOT NULL,
             estado TEXT NOT NULL DEFAULT 'pendiente',
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            fecha_disparo TIMESTAMP
+            fecha_disparo TIMESTAMP,
+            evento_id INTEGER,
+            anticipacion_minutos INTEGER
         )
     """)
+
+    columnas = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(recordatorios)"
+        ).fetchall()
+    }
+
+    if "evento_id" not in columnas:
+        cursor.execute("""
+            ALTER TABLE recordatorios
+            ADD COLUMN evento_id INTEGER
+        """)
+
+    if "anticipacion_minutos" not in columnas:
+        cursor.execute("""
+            ALTER TABLE recordatorios
+            ADD COLUMN anticipacion_minutos INTEGER
+        """)
 
     conexion.commit()
     conexion.close()
@@ -40,7 +61,9 @@ def crear_tabla_recordatorios():
 # CONSULTAS
 # ==========================================================
 
-def obtener_recordatorio_por_id(recordatorio_id):
+def obtener_recordatorio_por_id(
+    recordatorio_id
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -50,11 +73,15 @@ def obtener_recordatorio_por_id(recordatorio_id):
             titulo,
             mensaje,
             fecha_hora,
-            estado
+            estado,
+            evento_id,
+            anticipacion_minutos
         FROM recordatorios
         WHERE id = ?
         LIMIT 1
-    """, (recordatorio_id,))
+    """, (
+        recordatorio_id,
+    ))
 
     resultado = cursor.fetchone()
 
@@ -77,6 +104,36 @@ def obtener_recordatorios_pendientes():
         WHERE estado = 'pendiente'
         ORDER BY fecha_hora ASC
     """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_recordatorios_de_evento(
+    evento_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            mensaje,
+            fecha_hora,
+            estado,
+            evento_id,
+            anticipacion_minutos
+        FROM recordatorios
+        WHERE evento_id = ?
+          AND estado = 'pendiente'
+        ORDER BY fecha_hora ASC
+    """, (
+        evento_id,
+    ))
 
     resultados = cursor.fetchall()
 
@@ -143,7 +200,9 @@ def buscar_recordatorio_pendiente(
 def crear_recordatorio(
     titulo,
     fecha_hora,
-    mensaje=""
+    mensaje="",
+    evento_id=None,
+    anticipacion_minutos=None
 ):
     existente = buscar_recordatorio_pendiente(
         titulo,
@@ -164,13 +223,17 @@ def crear_recordatorio(
             titulo,
             mensaje,
             fecha_hora,
-            estado
+            estado,
+            evento_id,
+            anticipacion_minutos
         )
-        VALUES (?, ?, ?, 'pendiente')
+        VALUES (?, ?, ?, 'pendiente', ?, ?)
     """, (
         titulo.strip(),
         mensaje.strip(),
-        fecha_hora
+        fecha_hora,
+        evento_id,
+        anticipacion_minutos
     ))
 
     recordatorio_id = cursor.lastrowid
@@ -261,6 +324,95 @@ def modificar_recordatorio(
         "actualizado",
         recordatorio_id
     )
+
+
+# ==========================================================
+# VÍNCULO CON EVENTOS
+# ==========================================================
+
+def reprogramar_recordatorios_de_evento(
+    evento_id,
+    fecha_evento,
+    hora_evento
+):
+    if not fecha_evento or not hora_evento:
+        return 0
+
+    try:
+        momento_evento = datetime.fromisoformat(
+            f"{fecha_evento}T{hora_evento}:00"
+        )
+
+    except ValueError:
+        return 0
+
+    recordatorios = (
+        obtener_recordatorios_de_evento(
+            evento_id
+        )
+    )
+
+    actualizados = 0
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    for recordatorio in recordatorios:
+
+        recordatorio_id = recordatorio[0]
+        anticipacion_minutos = recordatorio[6]
+
+        if anticipacion_minutos is None:
+            continue
+
+        nuevo_momento = (
+            momento_evento
+            - timedelta(
+                minutes=anticipacion_minutos
+            )
+        )
+
+        cursor.execute("""
+            UPDATE recordatorios
+            SET fecha_hora = ?
+            WHERE id = ?
+              AND estado = 'pendiente'
+        """, (
+            nuevo_momento
+            .replace(microsecond=0)
+            .isoformat(),
+            recordatorio_id
+        ))
+
+        actualizados += 1
+
+    conexion.commit()
+    conexion.close()
+
+    return actualizados
+
+
+def cancelar_recordatorios_de_evento(
+    evento_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE recordatorios
+        SET estado = 'cancelado'
+        WHERE evento_id = ?
+          AND estado = 'pendiente'
+    """, (
+        evento_id,
+    ))
+
+    cantidad = cursor.rowcount
+
+    conexion.commit()
+    conexion.close()
+
+    return cantidad
 
 
 # ==========================================================

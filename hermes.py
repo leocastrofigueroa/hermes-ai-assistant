@@ -31,6 +31,8 @@ from recordatorios import (
     obtener_recordatorio_por_id,
     modificar_recordatorio,
     cancelar_recordatorio,
+    reprogramar_recordatorios_de_evento,
+    cancelar_recordatorios_de_evento,
 )
 
 
@@ -65,6 +67,9 @@ Tenés memoria permanente.
 Una TAREA es algo pendiente por hacer.
 Un EVENTO ocupa un momento determinado de la agenda.
 Un RECORDATORIO avisa activamente en una fecha y hora.
+
+Los recordatorios pueden estar vinculados a eventos.
+Si un evento cambia, sus avisos asociados deben cambiar también.
 
 No guardes tareas, eventos ni recordatorios
 como recuerdos personales.
@@ -357,6 +362,14 @@ PALABRAS_VACIAS = {
     "pasalo",
     "pasala",
     "recordatorio",
+    "avisame",
+    "recordame",
+    "recuerdame",
+    "antes",
+    "hora",
+    "horas",
+    "minuto",
+    "minutos",
 }
 
 
@@ -699,6 +712,9 @@ def cancelar_recordatorio_desde_mensaje(
         texto
     )
 
+    recordatorio = None
+    recordatorio_id = None
+
     if coincidencia:
         recordatorio_id = int(
             coincidencia.group(1)
@@ -790,6 +806,9 @@ def modificar_recordatorio_desde_mensaje(
         r"recordatorio\s*#?\s*(\d+)",
         texto
     )
+
+    actual = None
+    recordatorio_id = None
 
     if coincidencia:
         recordatorio_id = int(
@@ -1056,11 +1075,18 @@ def crear_recordatorio_antes_evento(
             f"no tiene hora."
         )
 
-    momento_evento = (
-        datetime.fromisoformat(
-            f"{fecha}T{hora_inicio}:00"
+    try:
+        momento_evento = (
+            datetime.fromisoformat(
+                f"{fecha}T{hora_inicio}:00"
+            )
         )
-    )
+
+    except ValueError:
+        return (
+            "No pude interpretar correctamente "
+            "la fecha u hora del evento."
+        )
 
     momento_aviso = (
         momento_evento
@@ -1082,9 +1108,17 @@ def crear_recordatorio_antes_evento(
 
     estado, recordatorio_id = (
         crear_recordatorio(
-            titulo,
-            momento_aviso.isoformat(),
-            mensaje_recordatorio
+            titulo=titulo,
+            fecha_hora=(
+                momento_aviso
+                .replace(
+                    microsecond=0
+                )
+                .isoformat()
+            ),
+            mensaje=mensaje_recordatorio,
+            evento_id=evento_id,
+            anticipacion_minutos=minutos
         )
     )
 
@@ -1217,12 +1251,25 @@ def modificar_evento_desde_mensaje(
         else hora_actual
     )
 
+    hora_fin_final = (
+        hora_fin_nueva
+        if hora_fin_nueva
+        else hora_fin_actual
+    )
+
     if hora_final:
-        momento_nuevo = (
-            datetime.fromisoformat(
-                f"{fecha_final}T{hora_final}:00"
+        try:
+            momento_nuevo = (
+                datetime.fromisoformat(
+                    f"{fecha_final}T{hora_final}:00"
+                )
             )
-        )
+
+        except ValueError:
+            return (
+                "No pude interpretar la nueva "
+                "fecha u hora del evento."
+            )
 
         if momento_nuevo <= datetime.now():
             return (
@@ -1235,11 +1282,7 @@ def modificar_evento_desde_mensaje(
             evento_id=evento_id,
             fecha=fecha_final,
             hora_inicio=hora_final,
-            hora_fin=(
-                hora_fin_nueva
-                if hora_fin_nueva
-                else hora_fin_actual
-            )
+            hora_fin=hora_fin_final
         )
     )
 
@@ -1255,6 +1298,17 @@ def modificar_evento_desde_mensaje(
             f"ya no está activo."
         )
 
+    cantidad_reprogramada = 0
+
+    if hora_final:
+        cantidad_reprogramada = (
+            reprogramar_recordatorios_de_evento(
+                evento_id,
+                fecha_final,
+                hora_final
+            )
+        )
+
     respuesta = (
         f"Listo. Moví el evento "
         f"#{evento_id}: {titulo} "
@@ -1267,6 +1321,19 @@ def modificar_evento_desde_mensaje(
         )
 
     respuesta += "."
+
+    if cantidad_reprogramada == 1:
+        respuesta += (
+            " También actualicé "
+            "1 recordatorio asociado."
+        )
+
+    elif cantidad_reprogramada > 1:
+        respuesta += (
+            f" También actualicé "
+            f"{cantidad_reprogramada} "
+            f"recordatorios asociados."
+        )
 
     return respuesta
 
@@ -1282,6 +1349,9 @@ def cancelar_evento_desde_mensaje(
         r"evento\s*#?\s*(\d+)",
         texto
     )
+
+    evento = None
+    evento_id = None
 
     if coincidencia:
         evento_id = int(
@@ -1328,11 +1398,32 @@ def cancelar_evento_desde_mensaje(
             f"#{evento_id}."
         )
 
-    return (
+    cantidad_cancelada = (
+        cancelar_recordatorios_de_evento(
+            evento_id
+        )
+    )
+
+    respuesta = (
         f"Listo. Cancelé el evento "
         f"#{evento_id}: "
         f"{evento[1]}."
     )
+
+    if cantidad_cancelada == 1:
+        respuesta += (
+            " También cancelé "
+            "1 recordatorio asociado."
+        )
+
+    elif cantidad_cancelada > 1:
+        respuesta += (
+            f" También cancelé "
+            f"{cantidad_cancelada} "
+            f"recordatorios asociados."
+        )
+
+    return respuesta
 
 
 # ==========================================================
@@ -2111,6 +2202,7 @@ print("✅ Gestión de tareas: activa")
 print("🗓️ Agenda y eventos: activos")
 print("🔔 Recordatorios: activos")
 print("⏰ Avisos previos a eventos: activos")
+print("🔗 Vínculo evento-recordatorio: activo")
 print("✏️ Modificación natural: activa")
 print("🗑️ Cancelación natural: activa")
 print()
