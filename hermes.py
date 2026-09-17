@@ -3332,6 +3332,84 @@ def es_cancelacion_evento(
     )
 
 
+
+def reprogramar_avisos_evento_seguro(
+    evento_id,
+    fecha_evento,
+    hora_evento,
+):
+    """
+    Reprograma los avisos pendientes vinculados a un evento.
+
+    Los avisos cuyo nuevo horario continúa en el futuro se actualizan.
+    Los avisos cuyo nuevo horario ya quedó en el pasado se cancelan.
+    Conserva evento_id y anticipacion_minutos.
+    """
+
+    recordatorios = obtener_recordatorios_de_evento(
+        evento_id
+    )
+
+    if not recordatorios:
+        return 0, 0
+
+    momento_evento = datetime.fromisoformat(
+        f"{fecha_evento}T{hora_evento}:00"
+    )
+
+    ahora = datetime.now()
+    actualizados = 0
+    cancelados_pasado = 0
+
+    for recordatorio in recordatorios:
+
+        recordatorio_id = recordatorio[0]
+        titulo = recordatorio[1]
+        anticipacion = recordatorio[6]
+
+        if anticipacion is None:
+            continue
+
+        nuevo_momento = (
+            momento_evento
+            - timedelta(
+                minutes=anticipacion
+            )
+        )
+
+        if nuevo_momento <= ahora:
+
+            estado, _ = cancelar_recordatorio(
+                recordatorio_id
+            )
+
+            if estado == "cancelado":
+                cancelados_pasado += 1
+
+            continue
+
+        mensaje_recordatorio = (
+            f"En {descripcion_anticipacion(anticipacion)} "
+            f"tenés {titulo}."
+        )
+
+        estado, _ = actualizar_recordatorio_vinculado(
+            recordatorio_id=recordatorio_id,
+            nueva_fecha_hora=(
+                nuevo_momento
+                .replace(microsecond=0)
+                .isoformat()
+            ),
+            anticipacion_minutos=anticipacion,
+            nuevo_mensaje=mensaje_recordatorio,
+        )
+
+        if estado == "actualizado":
+            actualizados += 1
+
+    return actualizados, cancelados_pasado
+
+
 def aplicar_modificacion_evento(
     evento,
     fecha_nueva=None,
@@ -3401,15 +3479,17 @@ def aplicar_modificacion_evento(
         )
 
     cantidad_reprogramada = 0
+    cantidad_cancelada_por_pasado = 0
 
     if hora_final:
 
-        cantidad_reprogramada = (
-            reprogramar_recordatorios_de_evento(
-                evento_id,
-                fecha_final,
-                hora_final,
-            )
+        (
+            cantidad_reprogramada,
+            cantidad_cancelada_por_pasado,
+        ) = reprogramar_avisos_evento_seguro(
+            evento_id,
+            fecha_final,
+            hora_final,
         )
 
     respuesta = (
@@ -3439,6 +3519,22 @@ def aplicar_modificacion_evento(
             f" También actualicé "
             f"{cantidad_reprogramada} "
             f"recordatorios asociados."
+        )
+
+    if cantidad_cancelada_por_pasado == 1:
+
+        respuesta += (
+            " Cancelé 1 aviso asociado "
+            "porque su nuevo horario ya había pasado."
+        )
+
+    elif cantidad_cancelada_por_pasado > 1:
+
+        respuesta += (
+            f" Cancelé "
+            f"{cantidad_cancelada_por_pasado} "
+            f"avisos asociados porque sus nuevos horarios "
+            f"ya habían pasado."
         )
 
     return respuesta
@@ -3950,6 +4046,266 @@ def agenda_semana():
     )
 
 
+
+# ==========================================================
+# AUDITORÍA DE SINCRONIZACIÓN EVENTO ↔ RECORDATORIOS
+# ==========================================================
+
+def es_auditoria_sincronizacion(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_sincronizacion = any(
+        expresion in texto
+        for expresion in (
+            "sincronizacion",
+            "sincronizados",
+            "sincronizado",
+            "desfasados",
+            "desfasado",
+        )
+    )
+
+    accion_revision = any(
+        expresion in texto
+        for expresion in (
+            "revisa",
+            "revisar",
+            "verifica",
+            "verificar",
+            "audita",
+            "auditar",
+            "controla",
+            "controlar",
+            "comproba",
+            "comprobar",
+        )
+    )
+
+    habla_de_eventos = (
+        "evento" in texto
+        or "eventos" in texto
+        or "recordatorio" in texto
+        or "recordatorios" in texto
+        or "aviso" in texto
+        or "avisos" in texto
+    )
+
+    return (
+        menciona_sincronizacion
+        and accion_revision
+        and habla_de_eventos
+    )
+
+
+def revisar_sincronizacion_eventos():
+    """
+    Revisa todos los recordatorios pendientes vinculados a eventos.
+
+    Detecta:
+    - vínculos a eventos inexistentes;
+    - vínculos a eventos ya no activos;
+    - datos de vínculo incompletos;
+    - fecha/hora de aviso desfasada respecto del evento
+      y su anticipación guardada.
+
+    Esta función solo audita: no modifica datos.
+    """
+
+    pendientes = obtener_recordatorios_pendientes()
+
+    vinculados = []
+    problemas = []
+
+    for pendiente in pendientes:
+
+        recordatorio_id = pendiente[0]
+
+        recordatorio = obtener_recordatorio_por_id(
+            recordatorio_id
+        )
+
+        if not recordatorio:
+            continue
+
+        evento_id = recordatorio[5]
+        anticipacion = recordatorio[6]
+
+        if evento_id is None:
+            continue
+
+        vinculados.append(
+            recordatorio
+        )
+
+        evento = obtener_evento_por_id(
+            evento_id
+        )
+
+        if not evento:
+
+            problemas.append(
+                (
+                    recordatorio_id,
+                    "huérfano",
+                    (
+                        f"está vinculado al evento #{evento_id}, "
+                        f"pero ese evento no existe"
+                    ),
+                )
+            )
+
+            continue
+
+        if evento[6] != "activo":
+
+            problemas.append(
+                (
+                    recordatorio_id,
+                    "evento no activo",
+                    (
+                        f"está vinculado a {evento[1]} "
+                        f"(evento #{evento_id}), "
+                        f"pero el evento está {evento[6]}"
+                    ),
+                )
+            )
+
+            continue
+
+        if not evento[3] or not evento[4]:
+
+            problemas.append(
+                (
+                    recordatorio_id,
+                    "evento incompleto",
+                    (
+                        f"{evento[1]} no tiene fecha "
+                        f"u hora suficiente"
+                    ),
+                )
+            )
+
+            continue
+
+        if anticipacion is None:
+
+            problemas.append(
+                (
+                    recordatorio_id,
+                    "anticipación faltante",
+                    (
+                        f"está vinculado a {evento[1]}, "
+                        f"pero no tiene anticipación guardada"
+                    ),
+                )
+            )
+
+            continue
+
+        try:
+
+            momento_evento = datetime.fromisoformat(
+                f"{evento[3]}T{evento[4]}:00"
+            )
+
+            momento_esperado = (
+                momento_evento
+                - timedelta(
+                    minutes=anticipacion
+                )
+            ).replace(
+                microsecond=0
+            )
+
+            momento_actual = datetime.fromisoformat(
+                recordatorio[3]
+            ).replace(
+                microsecond=0
+            )
+
+        except (TypeError, ValueError):
+
+            problemas.append(
+                (
+                    recordatorio_id,
+                    "fecha inválida",
+                    (
+                        f"no pude interpretar la fecha/hora "
+                        f"del aviso o del evento {evento[1]}"
+                    ),
+                )
+            )
+
+            continue
+
+        if momento_actual != momento_esperado:
+
+            problemas.append(
+                (
+                    recordatorio_id,
+                    "desfasado",
+                    (
+                        f"{evento[1]} debería avisar "
+                        f"{descripcion_anticipacion(anticipacion)} antes, "
+                        f"el "
+                        f"{fecha_para_mostrar(momento_esperado.date().isoformat())} "
+                        f"a las {momento_esperado.strftime('%H:%M')}, "
+                        f"pero está programado para "
+                        f"{fecha_para_mostrar(momento_actual.date().isoformat())} "
+                        f"a las {momento_actual.strftime('%H:%M')}"
+                    ),
+                )
+            )
+
+    if not vinculados:
+
+        return (
+            "No hay recordatorios pendientes vinculados a eventos "
+            "para revisar."
+        )
+
+    if not problemas:
+
+        cantidad = len(
+            vinculados
+        )
+
+        return (
+            f"Sincronización correcta. Revisé "
+            f"{cantidad} "
+            f"{'aviso vinculado' if cantidad == 1 else 'avisos vinculados'} "
+            f"y no encontré desfasajes ni vínculos huérfanos."
+        )
+
+    lineas = [
+        (
+            f"Encontré {len(problemas)} "
+            f"{'problema' if len(problemas) == 1 else 'problemas'} "
+            f"de sincronización:"
+        )
+    ]
+
+    for recordatorio_id, tipo, detalle in problemas:
+
+        lineas.append(
+            f"- Recordatorio #{recordatorio_id} "
+            f"({tipo}): {detalle}."
+        )
+
+    lineas.append("")
+    lineas.append(
+        "No modifiqué nada; esto fue solamente una auditoría."
+    )
+
+    return "\n".join(
+        lineas
+    )
+
+
 # ==========================================================
 # CONSULTAS INDEPENDIENTES
 # ==========================================================
@@ -4032,6 +4388,12 @@ def procesar_comandos_directos(
         return respuesta_contexto_faltante(
             mensaje
         )
+
+    if es_auditoria_sincronizacion(
+        mensaje
+    ):
+
+        return revisar_sincronizacion_eventos()
 
     # ======================================================
     # GESTIÓN AVANZADA DE AVISOS
@@ -4671,6 +5033,8 @@ print("🎛️ Gestión avanzada de avisos: activa")
 print("🔗 Referencias contextuales de edición: activas")
 print("⏱️ Edición natural de recordatorios: activa")
 print("↔️ Edición relativa de eventos: activa")
+print("🔄 Sincronización segura evento-aviso: activa")
+print("🧪 Auditoría evento-recordatorios: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()
