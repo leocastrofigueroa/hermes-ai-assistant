@@ -30,7 +30,8 @@ def crear_tabla_recordatorios():
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fecha_disparo TIMESTAMP,
             evento_id INTEGER,
-            anticipacion_minutos INTEGER
+            anticipacion_minutos INTEGER,
+            tarea_id INTEGER
         )
     """)
 
@@ -51,6 +52,12 @@ def crear_tabla_recordatorios():
         cursor.execute("""
             ALTER TABLE recordatorios
             ADD COLUMN anticipacion_minutos INTEGER
+        """)
+
+    if "tarea_id" not in columnas:
+        cursor.execute("""
+            ALTER TABLE recordatorios
+            ADD COLUMN tarea_id INTEGER
         """)
 
     conexion.commit()
@@ -75,7 +82,8 @@ def obtener_recordatorio_por_id(
             fecha_hora,
             estado,
             evento_id,
-            anticipacion_minutos
+            anticipacion_minutos,
+            tarea_id
         FROM recordatorios
         WHERE id = ?
         LIMIT 1
@@ -126,7 +134,8 @@ def obtener_recordatorios_de_evento(
             fecha_hora,
             estado,
             evento_id,
-            anticipacion_minutos
+            anticipacion_minutos,
+            tarea_id
         FROM recordatorios
         WHERE evento_id = ?
           AND estado = 'pendiente'
@@ -136,6 +145,37 @@ def obtener_recordatorios_de_evento(
             id ASC
     """, (
         evento_id,
+    ))
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_recordatorios_de_tarea(
+    tarea_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            mensaje,
+            fecha_hora,
+            estado,
+            evento_id,
+            anticipacion_minutos,
+            tarea_id
+        FROM recordatorios
+        WHERE tarea_id = ?
+          AND estado = 'pendiente'
+        ORDER BY fecha_hora ASC, id ASC
+    """, (
+        tarea_id,
     ))
 
     resultados = cursor.fetchall()
@@ -205,7 +245,8 @@ def crear_recordatorio(
     fecha_hora,
     mensaje="",
     evento_id=None,
-    anticipacion_minutos=None
+    anticipacion_minutos=None,
+    tarea_id=None
 ):
     existente = buscar_recordatorio_pendiente(
         titulo,
@@ -228,15 +269,17 @@ def crear_recordatorio(
             fecha_hora,
             estado,
             evento_id,
-            anticipacion_minutos
+            anticipacion_minutos,
+            tarea_id
         )
-        VALUES (?, ?, ?, 'pendiente', ?, ?)
+        VALUES (?, ?, ?, 'pendiente', ?, ?, ?)
     """, (
         titulo.strip(),
         mensaje.strip(),
         fecha_hora,
         evento_id,
-        anticipacion_minutos
+        anticipacion_minutos,
+        tarea_id
     ))
 
     recordatorio_id = cursor.lastrowid
@@ -474,6 +517,33 @@ def cancelar_recordatorios_de_evento(
           AND estado = 'pendiente'
     """, (
         evento_id,
+    ))
+
+    cantidad = cursor.rowcount
+
+    conexion.commit()
+    conexion.close()
+
+    return cantidad
+
+
+# ==========================================================
+# VÍNCULO CON TAREAS
+# ==========================================================
+
+def cancelar_recordatorios_de_tarea(
+    tarea_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE recordatorios
+        SET estado = 'cancelado'
+        WHERE tarea_id = ?
+          AND estado = 'pendiente'
+    """, (
+        tarea_id,
     ))
 
     cantidad = cursor.rowcount

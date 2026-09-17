@@ -30,11 +30,13 @@ from recordatorios import (
     obtener_recordatorios_pendientes,
     obtener_recordatorio_por_id,
     obtener_recordatorios_de_evento,
+    obtener_recordatorios_de_tarea,
     modificar_recordatorio,
     actualizar_recordatorio_vinculado,
     cancelar_recordatorio,
     reprogramar_recordatorios_de_evento,
     cancelar_recordatorios_de_evento,
+    cancelar_recordatorios_de_tarea,
 )
 
 
@@ -2463,6 +2465,161 @@ def dejar_solo_aviso_desde_mensaje(
         f"Cancelé {cancelados} "
         f"{'aviso' if cancelados == 1 else 'avisos'} adicional"
         f"{'' if cancelados == 1 else 'es'}."
+    )
+
+
+# ==========================================================
+# RECORDATORIOS VINCULADOS A TAREAS
+# ==========================================================
+
+def buscar_tarea_desde_mensaje(
+    mensaje
+):
+    tareas = obtener_tareas_pendientes()
+
+    candidatos = []
+
+    for tarea in tareas:
+
+        puntuacion = puntuacion_coincidencia(
+            mensaje,
+            tarea[1]
+        )
+
+        if puntuacion > 0:
+
+            candidatos.append(
+                (
+                    puntuacion,
+                    tarea,
+                )
+            )
+
+    if not candidatos:
+        return None
+
+    candidatos.sort(
+        key=lambda elemento: (
+            -elemento[0],
+            elemento[1][3] or "9999-12-31",
+            elemento[1][0],
+        )
+    )
+
+    return candidatos[0][1]
+
+
+def es_recordatorio_vinculado_tarea(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    tiene_orden = es_orden_recordatorio(
+        mensaje
+    )
+
+    menciona_tarea = bool(
+        re.search(
+            r"\b(?:la\s+)?tarea\b",
+            texto
+        )
+    )
+
+    return (
+        tiene_orden
+        and menciona_tarea
+    )
+
+
+def crear_recordatorio_vinculado_tarea_desde_mensaje(
+    mensaje
+):
+    tarea = buscar_tarea_desde_mensaje(
+        mensaje
+    )
+
+    if not tarea:
+
+        return (
+            "No pude identificar a qué tarea "
+            "querés vincular el recordatorio."
+        )
+
+    fecha = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not fecha:
+        fecha = tarea[3]
+
+    if not fecha:
+
+        return (
+            f"La tarea #{tarea[0]}: {tarea[1]} no tiene fecha. "
+            f"Decime qué día querés que te avise."
+        )
+
+    if not hora:
+
+        return (
+            f"Necesito saber a qué hora querés que te recuerde "
+            f"la tarea {tarea[1]}."
+        )
+
+    momento = datetime.fromisoformat(
+        f"{fecha}T{hora}:00"
+    )
+
+    if momento <= datetime.now():
+
+        return (
+            "Ese momento ya pasó."
+        )
+
+    existentes = obtener_recordatorios_de_tarea(
+        tarea[0]
+    )
+
+    for recordatorio in existentes:
+
+        if recordatorio[3] == momento.isoformat():
+
+            return (
+                f"Ya tenés ese aviso para la tarea "
+                f"#{tarea[0]} como recordatorio "
+                f"#{recordatorio[0]}."
+            )
+
+    mensaje_recordatorio = (
+        f"Tarea pendiente: {tarea[1]}."
+    )
+
+    estado, recordatorio_id = crear_recordatorio(
+        titulo=tarea[1],
+        fecha_hora=momento.isoformat(),
+        mensaje=mensaje_recordatorio,
+        tarea_id=tarea[0],
+    )
+
+    if estado == "duplicado":
+
+        return (
+            f"Ya tenés ese recordatorio "
+            f"programado como #{recordatorio_id}."
+        )
+
+    return (
+        f"Listo. Creé el recordatorio "
+        f"#{recordatorio_id} vinculado a la tarea "
+        f"#{tarea[0]}: {tarea[1]}, para "
+        f"{fecha_para_mostrar(fecha)} "
+        f"a las {hora}."
     )
 
 
@@ -5586,6 +5743,16 @@ def procesar_comandos_directos(
                 mensaje
             )
 
+    # RECORDATORIOS VINCULADOS A TAREAS
+
+    if es_recordatorio_vinculado_tarea(
+        mensaje
+    ):
+
+        return crear_recordatorio_vinculado_tarea_desde_mensaje(
+            mensaje
+        )
+
     # RECORDATORIOS GENERALES
 
     if es_cancelacion_recordatorio(
@@ -5817,8 +5984,10 @@ def procesar_comandos_directos(
         palabra in texto
         for palabra in (
             "completar",
+            "completa",
             "complete",
             "termine",
+            "termina",
             "marcar como hecha",
         )
     ):
@@ -5847,20 +6016,62 @@ def procesar_comandos_directos(
 
             if tarea[4] == "completada":
 
-                return (
+                cantidad_cancelada = cancelar_recordatorios_de_tarea(
+                    tarea_id
+                )
+
+                respuesta = (
                     f"La tarea #{tarea_id} "
                     f"ya estaba completada."
                 )
+
+                if cantidad_cancelada == 1:
+
+                    respuesta += (
+                        " Cancelé 1 recordatorio "
+                        "vinculado que seguía pendiente."
+                    )
+
+                elif cantidad_cancelada > 1:
+
+                    respuesta += (
+                        f" Cancelé {cantidad_cancelada} "
+                        f"recordatorios vinculados "
+                        f"que seguían pendientes."
+                    )
+
+                return respuesta
 
             completar_tarea(
                 tarea_id
             )
 
-            return (
+            cantidad_cancelada = cancelar_recordatorios_de_tarea(
+                tarea_id
+            )
+
+            respuesta = (
                 f"Listo. Completé la tarea "
                 f"#{tarea_id}: "
                 f"{tarea[1]}."
             )
+
+            if cantidad_cancelada == 1:
+
+                respuesta += (
+                    " También cancelé 1 recordatorio "
+                    "vinculado a esa tarea."
+                )
+
+            elif cantidad_cancelada > 1:
+
+                respuesta += (
+                    f" También cancelé "
+                    f"{cantidad_cancelada} recordatorios "
+                    f"vinculados a esa tarea."
+                )
+
+            return respuesta
 
     return None
 
@@ -6221,6 +6432,7 @@ print("📆 Períodos naturales: activos")
 print("⏳ Duración natural de eventos: activa")
 print("🕐 Edición de duración de eventos: activa")
 print("🧭 Conservación automática de duración al mover eventos: activa")
+print("✅ Recordatorios vinculados a tareas: activos")
 print()
 print("Escribí 'salir' para terminar.")
 print()
