@@ -1,19 +1,29 @@
 import sqlite3
+from datetime import datetime
+
 
 DB_PATH = "hermes.db"
 
+
+# ==========================================================
+# CONEXIÓN
+# ==========================================================
 
 def conectar():
     return sqlite3.connect(DB_PATH)
 
 
+# ==========================================================
+# CREAR / MIGRAR BASE
+# ==========================================================
+
 def crear_base():
     conexion = conectar()
     cursor = conexion.cursor()
 
-    # -------------------------
-    # MEMORIA PERMANENTE
-    # -------------------------
+    # ------------------------------------------------------
+    # RECUERDOS
+    # ------------------------------------------------------
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS recuerdos (
@@ -26,30 +36,22 @@ def crear_base():
         )
     """)
 
-    columnas = cursor.execute(
-        "PRAGMA table_info(recuerdos)"
-    ).fetchall()
+    columnas_recuerdos = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(recuerdos)"
+        ).fetchall()
+    }
 
-    nombres_columnas = [
-        columna[1]
-        for columna in columnas
-    ]
-
-    if "fecha_actualizacion" not in nombres_columnas:
+    if "fecha_actualizacion" not in columnas_recuerdos:
         cursor.execute("""
             ALTER TABLE recuerdos
             ADD COLUMN fecha_actualizacion TIMESTAMP
         """)
 
-        cursor.execute("""
-            UPDATE recuerdos
-            SET fecha_actualizacion = fecha_creacion
-            WHERE fecha_actualizacion IS NULL
-        """)
-
-    # -------------------------
+    # ------------------------------------------------------
     # TAREAS
-    # -------------------------
+    # ------------------------------------------------------
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tareas (
@@ -63,9 +65,9 @@ def crear_base():
         )
     """)
 
-    # -------------------------
+    # ------------------------------------------------------
     # EVENTOS
-    # -------------------------
+    # ------------------------------------------------------
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS eventos (
@@ -85,30 +87,38 @@ def crear_base():
     conexion.close()
 
 
-def normalizar_clave(clave):
-    return clave.strip().lower()
-
-
 # ==========================================================
-# MEMORIA
+# RECUERDOS
 # ==========================================================
 
-def guardar_recuerdo(categoria, clave, valor):
+def guardar_recuerdo(
+    categoria,
+    clave,
+    valor
+):
+    categoria = categoria.strip()
+    clave = clave.strip().lower()
+    valor = valor.strip()
+
     conexion = conectar()
     cursor = conexion.cursor()
 
-    clave = normalizar_clave(clave)
-    valor = valor.strip()
-
-    existente = cursor.execute("""
-        SELECT id, valor
+    cursor.execute("""
+        SELECT
+            id,
+            valor
         FROM recuerdos
-        WHERE clave = ?
+        WHERE lower(clave) = lower(?)
         LIMIT 1
-    """, (clave,)).fetchone()
+    """, (
+        clave,
+    ))
+
+    existente = cursor.fetchone()
 
     if existente:
-        recuerdo_id, valor_actual = existente
+        recuerdo_id = existente[0]
+        valor_actual = existente[1]
 
         if valor_actual.strip() == valor:
             conexion.close()
@@ -135,10 +145,9 @@ def guardar_recuerdo(categoria, clave, valor):
         INSERT INTO recuerdos (
             categoria,
             clave,
-            valor,
-            fecha_actualizacion
+            valor
         )
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?)
     """, (
         categoria,
         clave,
@@ -161,11 +170,7 @@ def obtener_recuerdos():
             clave,
             valor
         FROM recuerdos
-        ORDER BY
-            COALESCE(
-                fecha_actualizacion,
-                fecha_creacion
-            ) DESC
+        ORDER BY id ASC
     """)
 
     resultados = cursor.fetchall()
@@ -179,7 +184,11 @@ def obtener_recuerdos():
 # TAREAS
 # ==========================================================
 
-def crear_tarea(titulo, descripcion="", fecha=None):
+def crear_tarea(
+    titulo,
+    descripcion="",
+    fecha=None
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -220,7 +229,7 @@ def obtener_tareas_pendientes():
         WHERE estado = 'pendiente'
         ORDER BY
             CASE
-                WHEN fecha IS NULL OR fecha = '' THEN 1
+                WHEN fecha IS NULL THEN 1
                 ELSE 0
             END,
             fecha ASC,
@@ -234,7 +243,9 @@ def obtener_tareas_pendientes():
     return resultados
 
 
-def obtener_tareas_por_fecha(fecha):
+def obtener_tareas_por_fecha(
+    fecha
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -247,9 +258,11 @@ def obtener_tareas_por_fecha(fecha):
             estado
         FROM tareas
         WHERE estado = 'pendiente'
-        AND fecha = ?
+          AND fecha = ?
         ORDER BY id ASC
-    """, (fecha,))
+    """, (
+        fecha,
+    ))
 
     resultados = cursor.fetchall()
 
@@ -258,7 +271,10 @@ def obtener_tareas_por_fecha(fecha):
     return resultados
 
 
-def obtener_tareas_entre_fechas(fecha_inicio, fecha_fin):
+def obtener_tareas_entre_fechas(
+    fecha_inicio,
+    fecha_fin
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -271,9 +287,7 @@ def obtener_tareas_entre_fechas(fecha_inicio, fecha_fin):
             estado
         FROM tareas
         WHERE estado = 'pendiente'
-        AND fecha IS NOT NULL
-        AND fecha >= ?
-        AND fecha <= ?
+          AND fecha BETWEEN ? AND ?
         ORDER BY fecha ASC, id ASC
     """, (
         fecha_inicio,
@@ -287,27 +301,9 @@ def obtener_tareas_entre_fechas(fecha_inicio, fecha_fin):
     return resultados
 
 
-def completar_tarea(tarea_id):
-    conexion = conectar()
-    cursor = conexion.cursor()
-
-    cursor.execute("""
-        UPDATE tareas
-        SET estado = 'completada',
-            fecha_actualizacion = CURRENT_TIMESTAMP
-        WHERE id = ?
-        AND estado = 'pendiente'
-    """, (tarea_id,))
-
-    cambios = cursor.rowcount
-
-    conexion.commit()
-    conexion.close()
-
-    return cambios > 0
-
-
-def obtener_tarea_por_id(tarea_id):
+def obtener_tarea_por_id(
+    tarea_id
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -321,13 +317,41 @@ def obtener_tarea_por_id(tarea_id):
         FROM tareas
         WHERE id = ?
         LIMIT 1
-    """, (tarea_id,))
+    """, (
+        tarea_id,
+    ))
 
     resultado = cursor.fetchone()
 
     conexion.close()
 
     return resultado
+
+
+def completar_tarea(
+    tarea_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE tareas
+        SET estado = 'completada',
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'pendiente'
+    """, (
+        tarea_id,
+    ))
+
+    actualizado = (
+        cursor.rowcount > 0
+    )
+
+    conexion.commit()
+    conexion.close()
+
+    return actualizado
 
 
 # ==========================================================
@@ -385,7 +409,14 @@ def obtener_eventos_activos():
             estado
         FROM eventos
         WHERE estado = 'activo'
-        ORDER BY fecha ASC, hora_inicio ASC, id ASC
+        ORDER BY
+            fecha ASC,
+            CASE
+                WHEN hora_inicio IS NULL THEN 1
+                ELSE 0
+            END,
+            hora_inicio ASC,
+            id ASC
     """)
 
     resultados = cursor.fetchall()
@@ -395,7 +426,9 @@ def obtener_eventos_activos():
     return resultados
 
 
-def obtener_eventos_por_fecha(fecha):
+def obtener_eventos_por_fecha(
+    fecha
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -410,9 +443,17 @@ def obtener_eventos_por_fecha(fecha):
             estado
         FROM eventos
         WHERE estado = 'activo'
-        AND fecha = ?
-        ORDER BY hora_inicio ASC, id ASC
-    """, (fecha,))
+          AND fecha = ?
+        ORDER BY
+            CASE
+                WHEN hora_inicio IS NULL THEN 1
+                ELSE 0
+            END,
+            hora_inicio ASC,
+            id ASC
+    """, (
+        fecha,
+    ))
 
     resultados = cursor.fetchall()
 
@@ -421,7 +462,10 @@ def obtener_eventos_por_fecha(fecha):
     return resultados
 
 
-def obtener_eventos_entre_fechas(fecha_inicio, fecha_fin):
+def obtener_eventos_entre_fechas(
+    fecha_inicio,
+    fecha_fin
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -436,9 +480,15 @@ def obtener_eventos_entre_fechas(fecha_inicio, fecha_fin):
             estado
         FROM eventos
         WHERE estado = 'activo'
-        AND fecha >= ?
-        AND fecha <= ?
-        ORDER BY fecha ASC, hora_inicio ASC, id ASC
+          AND fecha BETWEEN ? AND ?
+        ORDER BY
+            fecha ASC,
+            CASE
+                WHEN hora_inicio IS NULL THEN 1
+                ELSE 0
+            END,
+            hora_inicio ASC,
+            id ASC
     """, (
         fecha_inicio,
         fecha_fin
@@ -451,27 +501,9 @@ def obtener_eventos_entre_fechas(fecha_inicio, fecha_fin):
     return resultados
 
 
-def cancelar_evento(evento_id):
-    conexion = conectar()
-    cursor = conexion.cursor()
-
-    cursor.execute("""
-        UPDATE eventos
-        SET estado = 'cancelado',
-            fecha_actualizacion = CURRENT_TIMESTAMP
-        WHERE id = ?
-        AND estado = 'activo'
-    """, (evento_id,))
-
-    cambios = cursor.rowcount
-
-    conexion.commit()
-    conexion.close()
-
-    return cambios > 0
-
-
-def obtener_evento_por_id(evento_id):
+def obtener_evento_por_id(
+    evento_id
+):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -487,7 +519,9 @@ def obtener_evento_por_id(evento_id):
         FROM eventos
         WHERE id = ?
         LIMIT 1
-    """, (evento_id,))
+    """, (
+        evento_id,
+    ))
 
     resultado = cursor.fetchone()
 
@@ -496,6 +530,135 @@ def obtener_evento_por_id(evento_id):
     return resultado
 
 
+def modificar_evento(
+    evento_id,
+    fecha=None,
+    hora_inicio=None,
+    hora_fin=None,
+    titulo=None,
+    descripcion=None
+):
+    actual = obtener_evento_por_id(
+        evento_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[6] != "activo":
+        return (
+            "no_activo",
+            evento_id
+        )
+
+    titulo_final = (
+        titulo.strip()
+        if titulo is not None
+        else actual[1]
+    )
+
+    descripcion_final = (
+        descripcion.strip()
+        if descripcion is not None
+        else (actual[2] or "")
+    )
+
+    fecha_final = (
+        fecha
+        if fecha is not None
+        else actual[3]
+    )
+
+    hora_inicio_final = (
+        hora_inicio
+        if hora_inicio is not None
+        else actual[4]
+    )
+
+    hora_fin_final = (
+        hora_fin
+        if hora_fin is not None
+        else actual[5]
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE eventos
+        SET titulo = ?,
+            descripcion = ?,
+            fecha = ?,
+            hora_inicio = ?,
+            hora_fin = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'activo'
+    """, (
+        titulo_final,
+        descripcion_final,
+        fecha_final,
+        hora_inicio_final,
+        hora_fin_final,
+        evento_id
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizado",
+        evento_id
+    )
+
+
+def cancelar_evento(
+    evento_id
+):
+    actual = obtener_evento_por_id(
+        evento_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[6] == "cancelado":
+        return (
+            "ya_cancelado",
+            evento_id
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE eventos
+        SET estado = 'cancelado',
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'activo'
+    """, (
+        evento_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "cancelado",
+        evento_id
+    )
+
+
 if __name__ == "__main__":
     crear_base()
-    print("Base de datos de Hermes lista.")
+
+    print(
+        "Base de datos de Hermes lista."
+    )
