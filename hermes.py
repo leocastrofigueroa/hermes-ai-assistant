@@ -79,6 +79,13 @@ Si existe un aviso previo para un evento y Leo solicita
 otro con diferente anticipación, no decidas automáticamente
 si reemplazarlo o agregarlo.
 
+Si existen varios elementos posibles para una acción,
+no elijas uno arbitrariamente.
+Pedí que Leo aclare cuál quiere.
+
+No interpretes respuestas aisladas dependientes de contexto
+como nuevas tareas o eventos.
+
 No guardes tareas, eventos ni recordatorios
 como recuerdos personales.
 """
@@ -100,6 +107,93 @@ def normalizar_texto(texto):
         caracter
         for caracter in texto
         if unicodedata.category(caracter) != "Mn"
+    )
+
+
+# ==========================================================
+# SEGURIDAD CONVERSACIONAL
+# ==========================================================
+
+def es_respuesta_dependiente_sin_contexto(
+    mensaje
+):
+    """
+    Detecta frases que normalmente son respuestas
+    a algo anterior y que no deberían convertirse
+    por sí solas en una tarea, evento o recuerdo.
+
+    Ejemplos:
+    - El de 15 minutos
+    - El de una hora
+    - El primero
+    - Ese
+    - Reemplazalo
+    - Agregalo
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if not texto:
+        return False
+
+    patrones = (
+        r"^(el|la|los|las)\s+de\b",
+        r"^(el|la)\s+"
+        r"(primero|primera|segundo|segunda|"
+        r"tercero|tercera|ultimo|ultima)\b",
+        r"^(ese|esa|esos|esas|este|esta|estos|estas)$",
+        r"^(ese|esa|este|esta)\s+",
+        r"^(el|la)\s+#?\d+\s*$",
+        r"^(el|la)\s+recordatorio\s+#?\d+\s*$",
+    )
+
+    for patron in patrones:
+
+        if re.search(
+            patron,
+            texto
+        ):
+            return True
+
+    respuestas_dependientes = {
+        "agregalo",
+        "agregala",
+        "agrega",
+        "sumalo",
+        "sumala",
+        "reemplazalo",
+        "reemplazala",
+        "reemplaza",
+        "cambialo",
+        "cambiala",
+        "cancelalo",
+        "cancelala",
+        "dejalo",
+        "dejala",
+        "ese",
+        "esa",
+        "este",
+        "esta",
+        "el primero",
+        "el segundo",
+        "el tercero",
+        "la primera",
+        "la segunda",
+        "la tercera",
+    }
+
+    return texto in respuestas_dependientes
+
+
+def respuesta_contexto_faltante(
+    mensaje
+):
+    return (
+        f"No tengo una acción pendiente a la que pueda "
+        f"asociar “{mensaje.strip()}”. "
+        f"Decime a qué te referís."
     )
 
 
@@ -468,8 +562,54 @@ def descripcion_anticipacion(
     )
 
 
+def extraer_anticipacion_simple(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if "media hora" in texto:
+        return 30
+
+    if re.search(
+        r"\b(?:una|un)\s+hora\b",
+        texto
+    ):
+        return 60
+
+    if re.search(
+        r"\b(?:un|una)\s+dia\b",
+        texto
+    ):
+        return 1440
+
+    coincidencia = re.search(
+        r"\b(\d+)\s*"
+        r"(minuto|minutos|hora|horas|dia|dias)\b",
+        texto
+    )
+
+    if not coincidencia:
+        return None
+
+    cantidad = int(
+        coincidencia.group(1)
+    )
+
+    unidad = coincidencia.group(2)
+
+    if unidad.startswith("minuto"):
+        return cantidad
+
+    if unidad.startswith("hora"):
+        return cantidad * 60
+
+    return cantidad * 1440
+
+
 # ==========================================================
-# RECORDATORIOS NORMALES
+# RECORDATORIOS
 # ==========================================================
 
 def es_consulta_recordatorios(mensaje):
@@ -580,9 +720,7 @@ def crear_recordatorio_desde_mensaje(
     )
 
     if momento <= datetime.now():
-        return (
-            "Ese momento ya pasó."
-        )
+        return "Ese momento ya pasó."
 
     titulo = extraer_titulo_recordatorio(
         mensaje
@@ -612,9 +750,7 @@ def mostrar_recordatorios():
     recordatorios = obtener_recordatorios_pendientes()
 
     if not recordatorios:
-        return (
-            "No tenés recordatorios pendientes."
-        )
+        return "No tenés recordatorios pendientes."
 
     lineas = [
         "Tus recordatorios pendientes son:"
@@ -640,6 +776,7 @@ def mostrar_recordatorios():
             )
 
         except ValueError:
+
             lineas.append(
                 f"{recordatorio_id}. {titulo}"
             )
@@ -649,7 +786,7 @@ def mostrar_recordatorios():
     )
 
 
-def buscar_recordatorio_desde_mensaje(
+def buscar_recordatorios_candidatos(
     mensaje
 ):
     recordatorios = obtener_recordatorios_pendientes()
@@ -663,29 +800,68 @@ def buscar_recordatorio_desde_mensaje(
             recordatorio[1]
         )
 
-        if puntuacion > 0:
+        if puntuacion <= 0:
+            continue
+
+        completo = obtener_recordatorio_por_id(
+            recordatorio[0]
+        )
+
+        if completo:
+
             candidatos.append(
                 (
                     puntuacion,
-                    recordatorio
+                    completo
                 )
             )
 
     if not candidatos:
-        return None
+        return []
 
-    candidatos.sort(
-        key=lambda elemento: (
-            -elemento[0],
-            elemento[1][3]
+    puntuacion_maxima = max(
+        candidato[0]
+        for candidato in candidatos
+    )
+
+    mejores = [
+        candidato[1]
+        for candidato in candidatos
+        if candidato[0] == puntuacion_maxima
+    ]
+
+    mejores.sort(
+        key=lambda recordatorio: (
+            recordatorio[3],
+            recordatorio[0]
         )
     )
 
-    return candidatos[0][1]
+    return mejores
+
+
+def buscar_recordatorio_desde_mensaje(
+    mensaje
+):
+    candidatos = buscar_recordatorios_candidatos(
+        mensaje
+    )
+
+    if not candidatos:
+        return None
+
+    recordatorio = candidatos[0]
+
+    return (
+        recordatorio[0],
+        recordatorio[1],
+        recordatorio[2],
+        recordatorio[3],
+    )
 
 
 # ==========================================================
-# MODIFICAR / CANCELAR RECORDATORIOS
+# CANCELAR RECORDATORIOS
 # ==========================================================
 
 def es_cancelacion_recordatorio(
@@ -711,9 +887,50 @@ def es_cancelacion_recordatorio(
     )
 
 
+def cancelar_un_recordatorio(
+    recordatorio
+):
+    recordatorio_id = recordatorio[0]
+
+    estado, _ = cancelar_recordatorio(
+        recordatorio_id
+    )
+
+    if estado == "ya_cancelado":
+
+        return (
+            f"El recordatorio "
+            f"#{recordatorio_id} "
+            f"ya estaba cancelado."
+        )
+
+    if estado == "ya_disparado":
+
+        return (
+            f"El recordatorio "
+            f"#{recordatorio_id} "
+            f"ya fue disparado."
+        )
+
+    if estado == "no_existe":
+
+        return (
+            f"No encontré el recordatorio "
+            f"#{recordatorio_id}."
+        )
+
+    return (
+        f"Listo. Cancelé el recordatorio "
+        f"#{recordatorio_id}: "
+        f"{recordatorio[1]}."
+    )
+
+
 def cancelar_recordatorio_desde_mensaje(
     mensaje
 ):
+    global confirmacion_pendiente
+
     texto = normalizar_texto(
         mensaje
     )
@@ -722,9 +939,6 @@ def cancelar_recordatorio_desde_mensaje(
         r"recordatorio\s*#?\s*(\d+)",
         texto
     )
-
-    recordatorio = None
-    recordatorio_id = None
 
     if coincidencia:
 
@@ -736,43 +950,230 @@ def cancelar_recordatorio_desde_mensaje(
             recordatorio_id
         )
 
-    else:
+        if not recordatorio:
 
-        recordatorio = buscar_recordatorio_desde_mensaje(
-            mensaje
+            return (
+                f"No encontré el recordatorio "
+                f"#{recordatorio_id}."
+            )
+
+        return cancelar_un_recordatorio(
+            recordatorio
         )
 
-        if recordatorio:
-            recordatorio_id = recordatorio[0]
+    candidatos = buscar_recordatorios_candidatos(
+        mensaje
+    )
 
-    if not recordatorio:
+    if not candidatos:
+
         return (
             "No pude identificar qué "
             "recordatorio querés cancelar."
         )
 
-    estado, _ = cancelar_recordatorio(
-        recordatorio_id
-    )
+    if len(candidatos) == 1:
 
-    if estado == "ya_cancelado":
-        return (
-            f"El recordatorio #{recordatorio_id} "
-            f"ya estaba cancelado."
+        return cancelar_un_recordatorio(
+            candidatos[0]
         )
 
-    if estado == "ya_disparado":
+    confirmacion_pendiente = {
+        "tipo": "cancelar_recordatorio_ambiguo",
+        "recordatorios": candidatos,
+    }
+
+    titulo = candidatos[0][1]
+
+    lineas = [
+        f"Tenés varios recordatorios "
+        f"para {titulo}:"
+    ]
+
+    for recordatorio in candidatos:
+
+        anticipacion = recordatorio[6]
+
+        if anticipacion is not None:
+
+            detalle = (
+                f"{descripcion_anticipacion(anticipacion)} "
+                f"antes"
+            )
+
+        else:
+
+            try:
+                momento = datetime.fromisoformat(
+                    recordatorio[3]
+                )
+
+                detalle = (
+                    f"{fecha_para_mostrar(momento.date().isoformat())} "
+                    f"a las {momento.strftime('%H:%M')}"
+                )
+
+            except ValueError:
+                detalle = recordatorio[3]
+
+        lineas.append(
+            f"- #{recordatorio[0]}: "
+            f"{detalle}"
+        )
+
+    lineas.append("")
+    lineas.append(
+        "¿Cuál querés cancelar?"
+    )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def procesar_cancelacion_recordatorio_ambiguo(
+    mensaje,
+    pendiente
+):
+    global confirmacion_pendiente
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    recordatorios = pendiente[
+        "recordatorios"
+    ]
+
+    if any(
+        expresion in texto
+        for expresion in (
+            "ninguno",
+            "ninguna",
+            "dejalo",
+            "dejala",
+            "deja",
+            "olvidalo",
+            "olvidala",
+            "olvida",
+            "no importa",
+            "no gracias",
+        )
+    ):
+
+        confirmacion_pendiente = None
+
         return (
-            f"El recordatorio #{recordatorio_id} "
-            f"ya fue disparado."
+            "Perfecto. No cancelé ninguno."
+        )
+
+    # PRIMERO BUSCAMOS ANTICIPACIÓN.
+    # Así "15 minutos" nunca se interpreta como ID #15.
+
+    anticipacion = extraer_anticipacion_simple(
+        mensaje
+    )
+
+    if anticipacion is not None:
+
+        coincidencias = [
+            recordatorio
+            for recordatorio in recordatorios
+            if recordatorio[6] == anticipacion
+        ]
+
+        if len(coincidencias) == 1:
+
+            confirmacion_pendiente = None
+
+            return cancelar_un_recordatorio(
+                coincidencias[0]
+            )
+
+        if len(coincidencias) > 1:
+
+            opciones = ", ".join(
+                f"#{recordatorio[0]}"
+                for recordatorio in coincidencias
+            )
+
+            return (
+                f"Hay más de un aviso con "
+                f"{descripcion_anticipacion(anticipacion)} "
+                f"de anticipación: "
+                f"{opciones}. "
+                f"Decime el número."
+            )
+
+        return (
+            f"No encontré entre esas opciones "
+            f"un aviso de "
+            f"{descripcion_anticipacion(anticipacion)}."
+        )
+
+    coincidencia_id = re.fullmatch(
+        r"\s*(?:"
+        r"recordatorio\s*#?\s*"
+        r"|#\s*"
+        r")?(\d+)\s*",
+        texto
+    )
+
+    if not coincidencia_id:
+
+        coincidencia_id = re.search(
+            r"\brecordatorio\s*#?\s*(\d+)\b",
+            texto
+        )
+
+    if not coincidencia_id:
+
+        coincidencia_id = re.search(
+            r"#\s*(\d+)\b",
+            texto
+        )
+
+    if coincidencia_id:
+
+        recordatorio_id = int(
+            coincidencia_id.group(1)
+        )
+
+        for recordatorio in recordatorios:
+
+            if recordatorio[0] == recordatorio_id:
+
+                confirmacion_pendiente = None
+
+                return cancelar_un_recordatorio(
+                    recordatorio
+                )
+
+        opciones = ", ".join(
+            f"#{recordatorio[0]}"
+            for recordatorio in recordatorios
+        )
+
+        return (
+            f"Ese no es uno de los "
+            f"recordatorios que estaba "
+            f"comparando. "
+            f"Las opciones son: "
+            f"{opciones}."
         )
 
     return (
-        f"Listo. Cancelé el recordatorio "
-        f"#{recordatorio_id}: "
-        f"{recordatorio[1]}."
+        "No pude saber cuál elegiste. "
+        "Podés decir, por ejemplo, "
+        "'el de 15 minutos', "
+        "'el de una hora', "
+        "'el recordatorio 8' o '#8'."
     )
 
+
+# ==========================================================
+# MODIFICAR RECORDATORIOS
+# ==========================================================
 
 def es_modificacion_recordatorio(
     mensaje
@@ -832,9 +1233,15 @@ def modificar_recordatorio_desde_mensaje(
         )
 
         if actual:
+
             recordatorio_id = actual[0]
 
+            actual = obtener_recordatorio_por_id(
+                recordatorio_id
+            )
+
     if not actual:
+
         return (
             "No pude identificar qué "
             "recordatorio querés modificar."
@@ -869,6 +1276,7 @@ def modificar_recordatorio_desde_mensaje(
     )
 
     if momento_nuevo <= datetime.now():
+
         return (
             "La nueva fecha y hora "
             "ya pasaron."
@@ -880,14 +1288,17 @@ def modificar_recordatorio_desde_mensaje(
     )
 
     if estado == "duplicado":
+
         return (
             f"Ya existe un recordatorio "
             f"igual como #{resultado_id}."
         )
 
     if estado == "no_pendiente":
+
         return (
-            f"El recordatorio #{recordatorio_id} "
+            f"El recordatorio "
+            f"#{recordatorio_id} "
             f"ya no está pendiente."
         )
 
@@ -919,6 +1330,7 @@ def buscar_evento_desde_mensaje(
         )
 
         if puntuacion > 0:
+
             candidatos.append(
                 (
                     puntuacion,
@@ -1036,12 +1448,14 @@ def crear_aviso_vinculado(
     )
 
     if momento_aviso is None:
+
         return (
             "El evento no tiene fecha "
             "u hora suficiente."
         )
 
     if momento_aviso <= datetime.now():
+
         return (
             "El momento para ese aviso "
             "ya pasó."
@@ -1052,7 +1466,8 @@ def crear_aviso_vinculado(
     )
 
     mensaje_recordatorio = (
-        f"En {descripcion} tenés {titulo}."
+        f"En {descripcion} "
+        f"tenés {titulo}."
     )
 
     estado, recordatorio_id = crear_recordatorio(
@@ -1068,6 +1483,7 @@ def crear_aviso_vinculado(
     )
 
     if estado == "duplicado":
+
         return (
             f"Ya tenés ese aviso "
             f"programado como "
@@ -1095,6 +1511,7 @@ def crear_recordatorio_antes_evento(
     )
 
     if minutos is None:
+
         return (
             "Necesito saber cuánto tiempo "
             "antes querés que te avise."
@@ -1105,12 +1522,14 @@ def crear_recordatorio_antes_evento(
     )
 
     if not evento:
+
         return (
             "No pude identificar el evento "
             "al que te referís."
         )
 
     if not evento[4]:
+
         return (
             f"El evento {evento[1]} "
             f"no tiene hora."
@@ -1151,7 +1570,8 @@ def crear_recordatorio_antes_evento(
 
             lineas.append(
                 f"- #{recordatorio[0]}: "
-                f"{descripcion_anticipacion(recordatorio[6])} antes"
+                f"{descripcion_anticipacion(recordatorio[6])} "
+                f"antes"
             )
 
         lineas.append("")
@@ -1161,7 +1581,8 @@ def crear_recordatorio_antes_evento(
             lineas.append(
                 f"El nuevo sería "
                 f"{descripcion_anticipacion(minutos)} antes. "
-                f"¿Querés reemplazarlo o agregar otro aviso?"
+                f"¿Querés reemplazarlo o "
+                f"agregar otro aviso?"
             )
 
         else:
@@ -1170,7 +1591,8 @@ def crear_recordatorio_antes_evento(
                 f"El nuevo sería "
                 f"{descripcion_anticipacion(minutos)} antes. "
                 f"Podés decir 'agregalo' o "
-                f"'reemplazá el recordatorio 7', por ejemplo."
+                f"'reemplazá el recordatorio "
+                f"{existentes[0][0]}'."
             )
 
         return "\n".join(
@@ -1184,22 +1606,14 @@ def crear_recordatorio_antes_evento(
 
 
 # ==========================================================
-# CONFIRMACIONES CONVERSACIONALES
+# CONFIRMACIÓN: AVISOS
 # ==========================================================
 
-def procesar_confirmacion_pendiente(
-    mensaje
+def procesar_confirmacion_aviso(
+    mensaje,
+    pendiente
 ):
     global confirmacion_pendiente
-
-    if confirmacion_pendiente is None:
-        return None
-
-    pendiente = confirmacion_pendiente
-
-    if pendiente.get("tipo") != "nuevo_aviso_evento":
-        confirmacion_pendiente = None
-        return None
 
     texto = normalizar_texto(
         mensaje
@@ -1211,10 +1625,6 @@ def procesar_confirmacion_pendiente(
     existentes = pendiente[
         "recordatorios_existentes"
     ]
-
-    # ------------------------------------------------------
-    # AGREGAR OTRO
-    # ------------------------------------------------------
 
     quiere_agregar = any(
         expresion in texto
@@ -1243,11 +1653,7 @@ def procesar_confirmacion_pendiente(
             minutos
         )
 
-    # ------------------------------------------------------
-    # NO HACER NADA
-    # ------------------------------------------------------
-
-    quiere_cancelar_decision = any(
+    quiere_cancelar = any(
         expresion in texto
         for expresion in (
             "dejalo",
@@ -1263,17 +1669,13 @@ def procesar_confirmacion_pendiente(
         )
     )
 
-    if quiere_cancelar_decision:
+    if quiere_cancelar:
 
         confirmacion_pendiente = None
 
         return (
             "Perfecto. No hice ningún cambio."
         )
-
-    # ------------------------------------------------------
-    # REEMPLAZAR
-    # ------------------------------------------------------
 
     quiere_reemplazar = any(
         expresion in texto
@@ -1342,10 +1744,7 @@ def procesar_confirmacion_pendiente(
             return (
                 f"Tenés varios avisos: "
                 f"{opciones}. "
-                f"Decime cuál querés reemplazar, "
-                f"por ejemplo: "
-                f"'Reemplazá el recordatorio "
-                f"{existentes[0][0]}'."
+                f"Decime cuál querés reemplazar."
             )
 
         momento_aviso = calcular_momento_aviso(
@@ -1415,23 +1814,6 @@ def procesar_confirmacion_pendiente(
             f"{evento[1]}."
         )
 
-    # ------------------------------------------------------
-    # REPITIÓ LA PETICIÓN ORIGINAL
-    # ------------------------------------------------------
-
-    if es_recordatorio_relativo_evento(
-        mensaje
-    ):
-
-        return (
-            "Ese aviso ya está pendiente "
-            "de tu decisión. "
-            "Decime si querés "
-            "'agregalo', "
-            "'reemplazá el recordatorio X' "
-            "o 'dejalo'."
-        )
-
     return (
         "Tengo pendiente decidir qué hacer "
         "con ese nuevo aviso. "
@@ -1442,7 +1824,7 @@ def procesar_confirmacion_pendiente(
 
 
 # ==========================================================
-# EVENTOS: MODIFICAR Y CANCELAR
+# MODIFICAR EVENTOS
 # ==========================================================
 
 def es_modificacion_evento(
@@ -1495,19 +1877,12 @@ def es_cancelacion_evento(
     )
 
 
-def modificar_evento_desde_mensaje(
-    mensaje
+def aplicar_modificacion_evento(
+    evento,
+    fecha_nueva=None,
+    hora_nueva=None,
+    hora_fin_nueva=None
 ):
-    evento = buscar_evento_desde_mensaje(
-        mensaje
-    )
-
-    if not evento:
-        return (
-            "No pude identificar qué "
-            "evento querés modificar."
-        )
-
     (
         evento_id,
         titulo,
@@ -1517,21 +1892,6 @@ def modificar_evento_desde_mensaje(
         hora_fin_actual,
         estado,
     ) = evento
-
-    fecha_nueva = extraer_fecha_del_mensaje(
-        mensaje
-    )
-
-    hora_nueva, hora_fin_nueva = extraer_horas_del_mensaje(
-        mensaje
-    )
-
-    if not fecha_nueva and not hora_nueva:
-        return (
-            f"Encontré el evento #{evento_id}: "
-            f"{titulo}, pero necesito saber "
-            f"la nueva fecha o la nueva hora."
-        )
 
     fecha_final = (
         fecha_nueva
@@ -1553,11 +1913,21 @@ def modificar_evento_desde_mensaje(
 
     if hora_final:
 
-        momento_nuevo = datetime.fromisoformat(
-            f"{fecha_final}T{hora_final}:00"
-        )
+        try:
+
+            momento_nuevo = datetime.fromisoformat(
+                f"{fecha_final}T{hora_final}:00"
+            )
+
+        except ValueError:
+
+            return (
+                "No pude interpretar correctamente "
+                "la nueva fecha u hora."
+            )
 
         if momento_nuevo <= datetime.now():
+
             return (
                 "La nueva fecha y hora "
                 "ya pasaron."
@@ -1571,12 +1941,14 @@ def modificar_evento_desde_mensaje(
     )
 
     if estado_modificacion == "no_existe":
+
         return (
             f"No encontré el evento "
             f"#{evento_id}."
         )
 
     if estado_modificacion == "no_activo":
+
         return (
             f"El evento #{evento_id} "
             f"ya no está activo."
@@ -1601,6 +1973,7 @@ def modificar_evento_desde_mensaje(
     )
 
     if hora_final:
+
         respuesta += (
             f" a las {hora_final}"
         )
@@ -1624,6 +1997,117 @@ def modificar_evento_desde_mensaje(
 
     return respuesta
 
+
+def modificar_evento_desde_mensaje(
+    mensaje
+):
+    global confirmacion_pendiente
+
+    evento = buscar_evento_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+
+        return (
+            "No pude identificar qué "
+            "evento querés modificar."
+        )
+
+    fecha_nueva = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    hora_nueva, hora_fin_nueva = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not fecha_nueva and not hora_nueva:
+
+        confirmacion_pendiente = {
+            "tipo": "completar_modificacion_evento",
+            "evento": evento,
+        }
+
+        return (
+            f"Encontré el evento "
+            f"#{evento[0]}: {evento[1]}. "
+            f"¿A qué día y hora querés moverlo?"
+        )
+
+    return aplicar_modificacion_evento(
+        evento=evento,
+        fecha_nueva=fecha_nueva,
+        hora_nueva=hora_nueva,
+        hora_fin_nueva=hora_fin_nueva
+    )
+
+
+def procesar_confirmacion_modificacion_evento(
+    mensaje,
+    pendiente
+):
+    global confirmacion_pendiente
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    evento = pendiente["evento"]
+
+    if any(
+        expresion in texto
+        for expresion in (
+            "dejalo",
+            "dejala",
+            "deja",
+            "olvidalo",
+            "olvidala",
+            "olvida",
+            "cancelar",
+            "cancela",
+            "no importa",
+        )
+    ):
+
+        confirmacion_pendiente = None
+
+        return (
+            "Perfecto. Dejé el evento como estaba."
+        )
+
+    fecha_nueva = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    hora_nueva, hora_fin_nueva = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not fecha_nueva and not hora_nueva:
+
+        return (
+            f"Tengo pendiente mover "
+            f"{evento[1]}. "
+            f"Decime una nueva fecha, "
+            f"una nueva hora o ambas. "
+            f"Por ejemplo: "
+            f"'el viernes a las 16'."
+        )
+
+    confirmacion_pendiente = None
+
+    return aplicar_modificacion_evento(
+        evento=evento,
+        fecha_nueva=fecha_nueva,
+        hora_nueva=hora_nueva,
+        hora_fin_nueva=hora_fin_nueva
+    )
+
+
+# ==========================================================
+# CANCELAR EVENTOS
+# ==========================================================
 
 def cancelar_evento_desde_mensaje(
     mensaje
@@ -1660,6 +2144,7 @@ def cancelar_evento_desde_mensaje(
             evento_id = evento[0]
 
     if not evento:
+
         return (
             "No pude identificar qué "
             "evento querés cancelar."
@@ -1707,6 +2192,50 @@ def cancelar_evento_desde_mensaje(
 
 
 # ==========================================================
+# CONFIRMACIONES GENERALES
+# ==========================================================
+
+def procesar_confirmacion_pendiente(
+    mensaje
+):
+    global confirmacion_pendiente
+
+    if confirmacion_pendiente is None:
+        return None
+
+    pendiente = confirmacion_pendiente
+
+    tipo = pendiente.get(
+        "tipo"
+    )
+
+    if tipo == "nuevo_aviso_evento":
+
+        return procesar_confirmacion_aviso(
+            mensaje,
+            pendiente
+        )
+
+    if tipo == "completar_modificacion_evento":
+
+        return procesar_confirmacion_modificacion_evento(
+            mensaje,
+            pendiente
+        )
+
+    if tipo == "cancelar_recordatorio_ambiguo":
+
+        return procesar_cancelacion_recordatorio_ambiguo(
+            mensaje,
+            pendiente
+        )
+
+    confirmacion_pendiente = None
+
+    return None
+
+
+# ==========================================================
 # MEMORIA
 # ==========================================================
 
@@ -1746,9 +2275,7 @@ def mostrar_tareas_pendientes():
     tareas = obtener_tareas_pendientes()
 
     if not tareas:
-        return (
-            "No tenés tareas pendientes."
-        )
+        return "No tenés tareas pendientes."
 
     lineas = [
         "Tus tareas pendientes son:"
@@ -1800,9 +2327,7 @@ def mostrar_eventos():
     eventos = obtener_eventos_activos()
 
     if not eventos:
-        return (
-            "No tenés eventos próximos."
-        )
+        return "No tenés eventos próximos."
 
     lineas = [
         "Tus próximos eventos son:"
@@ -1817,16 +2342,10 @@ def mostrar_eventos():
         )
 
         if evento[4]:
-
-            texto += (
-                f" — {evento[4]}"
-            )
+            texto += f" — {evento[4]}"
 
         if evento[5]:
-
-            texto += (
-                f" a {evento[5]}"
-            )
+            texto += f" a {evento[5]}"
 
         lineas.append(
             texto
@@ -1877,16 +2396,10 @@ def agenda_para_fecha(
             )
 
             if evento[4]:
-
-                texto += (
-                    f" — {evento[4]}"
-                )
+                texto += f" — {evento[4]}"
 
             if evento[5]:
-
-                texto += (
-                    f" a {evento[5]}"
-                )
+                texto += f" a {evento[5]}"
 
             lineas.append(
                 texto
@@ -1972,10 +2485,7 @@ def agenda_semana():
             )
 
             if evento[4]:
-
-                texto += (
-                    f" — {evento[4]}"
-                )
+                texto += f" — {evento[4]}"
 
             lineas.append(
                 texto
@@ -2001,21 +2511,87 @@ def agenda_semana():
 
 
 # ==========================================================
-# COMANDOS LOCALES
+# CONSULTAS INDEPENDIENTES
 # ==========================================================
 
-def procesar_comandos_directos(
+def es_consulta_independiente(
     mensaje
 ):
     texto = normalizar_texto(
         mensaje
     )
 
+    patrones = (
+        "que recordatorios tengo",
+        "mis recordatorios",
+        "recordatorios pendientes",
+        "mostrar recordatorios",
+        "listar recordatorios",
+        "que tareas tengo",
+        "mis tareas",
+        "tareas pendientes",
+        "que eventos tengo",
+        "mis eventos",
+        "proximos eventos",
+        "que tengo hoy",
+        "que tengo para hoy",
+        "agenda de hoy",
+        "que tengo manana",
+        "que tengo para manana",
+        "agenda de manana",
+        "que tengo esta semana",
+        "agenda de esta semana",
+    )
+
+    return any(
+        patron in texto
+        for patron in patrones
+    )
+
+
+# ==========================================================
+# COMANDOS LOCALES
+# ==========================================================
+
+def procesar_comandos_directos(
+    mensaje
+):
+    global confirmacion_pendiente
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    # Si existe una conversación pendiente pero Leo
+    # inicia una consulta claramente nueva,
+    # abandonamos el contexto pendiente.
+
+    if (
+        confirmacion_pendiente is not None
+        and es_consulta_independiente(mensaje)
+    ):
+        confirmacion_pendiente = None
+
+    # CONTEXTO PENDIENTE
+
     if confirmacion_pendiente is not None:
 
         return procesar_confirmacion_pendiente(
             mensaje
         )
+
+    # SEGURIDAD:
+    # Una frase dependiente sin contexto no va al modelo.
+
+    if es_respuesta_dependiente_sin_contexto(
+        mensaje
+    ):
+
+        return respuesta_contexto_faltante(
+            mensaje
+        )
+
+    # RECORDATORIOS
 
     if es_cancelacion_recordatorio(
         mensaje
@@ -2055,6 +2631,8 @@ def procesar_comandos_directos(
             mensaje
         )
 
+    # EVENTOS
+
     if es_modificacion_evento(
         mensaje
     ):
@@ -2082,6 +2660,8 @@ def procesar_comandos_directos(
             return cancelar_evento_desde_mensaje(
                 mensaje
             )
+
+    # AGENDA
 
     if any(
         patron in texto
@@ -2115,6 +2695,8 @@ def procesar_comandos_directos(
 
         return agenda_semana()
 
+    # TAREAS
+
     if any(
         patron in texto
         for patron in (
@@ -2126,6 +2708,8 @@ def procesar_comandos_directos(
 
         return mostrar_tareas_pendientes()
 
+    # EVENTOS
+
     if any(
         patron in texto
         for patron in (
@@ -2136,6 +2720,8 @@ def procesar_comandos_directos(
     ):
 
         return mostrar_eventos()
+
+    # COMPLETAR TAREA
 
     if any(
         palabra in texto
@@ -2302,6 +2888,9 @@ Acciones:
 "ninguna"
 "crear_tarea"
 "crear_evento"
+
+No inventes una tarea o evento a partir de una respuesta
+corta que dependa de una conversación anterior.
 
 No escribas nada fuera del JSON.
 """
@@ -2501,6 +3090,9 @@ print("⏰ Avisos previos a eventos: activos")
 print("🔗 Vínculo evento-recordatorio: activo")
 print("🔔 Múltiples avisos por evento: activos")
 print("💬 Confirmaciones conversacionales: activas")
+print("🧩 Datos faltantes de eventos: activos")
+print("🔀 Resolución de ambigüedades: activa")
+print("🛡️ Seguridad conversacional: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()
