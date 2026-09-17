@@ -63,6 +63,24 @@ def crear_base():
         )
     """)
 
+    # -------------------------
+    # EVENTOS
+    # -------------------------
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eventos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            descripcion TEXT,
+            fecha TEXT NOT NULL,
+            hora_inicio TEXT,
+            hora_fin TEXT,
+            estado TEXT NOT NULL DEFAULT 'activo',
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conexion.commit()
     conexion.close()
 
@@ -312,9 +330,172 @@ def obtener_tarea_por_id(tarea_id):
     return resultado
 
 
+# ==========================================================
+# EVENTOS
+# ==========================================================
+
+def crear_evento(
+    titulo,
+    fecha,
+    hora_inicio=None,
+    hora_fin=None,
+    descripcion=""
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        INSERT INTO eventos (
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado
+        )
+        VALUES (?, ?, ?, ?, ?, 'activo')
+    """, (
+        titulo.strip(),
+        descripcion.strip(),
+        fecha,
+        hora_inicio,
+        hora_fin
+    ))
+
+    evento_id = cursor.lastrowid
+
+    conexion.commit()
+    conexion.close()
+
+    return evento_id
+
+
+def obtener_eventos_activos():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos
+        WHERE estado = 'activo'
+        ORDER BY fecha ASC, hora_inicio ASC, id ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_eventos_por_fecha(fecha):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos
+        WHERE estado = 'activo'
+        AND fecha = ?
+        ORDER BY hora_inicio ASC, id ASC
+    """, (fecha,))
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_eventos_entre_fechas(fecha_inicio, fecha_fin):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos
+        WHERE estado = 'activo'
+        AND fecha >= ?
+        AND fecha <= ?
+        ORDER BY fecha ASC, hora_inicio ASC, id ASC
+    """, (
+        fecha_inicio,
+        fecha_fin
+    ))
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def cancelar_evento(evento_id):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE eventos
+        SET estado = 'cancelado',
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+        AND estado = 'activo'
+    """, (evento_id,))
+
+    cambios = cursor.rowcount
+
+    conexion.commit()
+    conexion.close()
+
+    return cambios > 0
+
+
+def obtener_evento_por_id(evento_id):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos
+        WHERE id = ?
+        LIMIT 1
+    """, (evento_id,))
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
 if __name__ == "__main__":
     crear_base()
-
-    print(
-        "Base de datos de Hermes lista."
-    )
+    print("Base de datos de Hermes lista.")

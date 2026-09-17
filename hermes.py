@@ -15,6 +15,12 @@ from memoria import (
     obtener_tareas_entre_fechas,
     completar_tarea,
     obtener_tarea_por_id,
+    crear_evento,
+    obtener_eventos_activos,
+    obtener_eventos_por_fecha,
+    obtener_eventos_entre_fechas,
+    cancelar_evento,
+    obtener_evento_por_id,
 )
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -31,7 +37,7 @@ Tu nombre es Hermes.
 Sos el asistente personal de inteligencia artificial de Leo.
 
 Tu función es ayudarlo a organizar su vida, proyectos,
-trabajo, estudios, tareas, eventos, ideas y preferencias.
+trabajo, estudios, tareas, agenda, eventos, ideas y preferencias.
 
 Hablá siempre en español salvo que Leo solicite otro idioma.
 
@@ -45,53 +51,48 @@ salvo que Leo pregunte específicamente por el modelo técnico.
 
 Tenés memoria permanente sobre Leo.
 
-También podés detectar cuando Leo expresa una NUEVA tarea.
+DIFERENCIA ENTRE TAREA Y EVENTO:
+
+Una TAREA es algo que Leo tiene que hacer.
 
 Ejemplos:
-- mañana tengo que llamar a Juan
-- el viernes tengo que pagar la tarjeta
-- tengo que comprar tinta
-- agregá como tarea enviar el presupuesto
+- comprar alimento
+- pagar la tarjeta
+- llamar a Juan
 
-IMPORTANTE:
+Un EVENTO ocupa un momento concreto de la agenda.
 
-El campo tarea_descripcion debe contener solamente
-detalles adicionales reales de la tarea.
+Ejemplos:
+- dentista el martes a las 16:30
+- reunión con Juan el viernes a las 10
+- clase de francés el miércoles de 8 a 10
+- turno médico mañana a las 14
 
-No pongas en tarea_descripcion expresiones de fecha como:
-- hoy
-- mañana
-- pasado mañana
-- lunes
-- martes
-- miércoles
-- jueves
-- viernes
-- sábado
-- domingo
-- el viernes
-- el sábado
+Si el mensaje describe una cita, reunión, turno, clase
+o actividad en un momento concreto, preferí crear un EVENTO.
 
-Las fechas son procesadas por Python.
-
-Las consultas y operaciones simples sobre tareas
-son procesadas directamente por Python.
+No guardes una tarea o evento también como recuerdo personal.
 """
 
 
+# ==========================================================
+# TEXTO
+# ==========================================================
+
 def normalizar_texto(texto):
     texto = texto.lower().strip()
-
     texto = unicodedata.normalize("NFD", texto)
 
-    texto = "".join(
+    return "".join(
         caracter
         for caracter in texto
         if unicodedata.category(caracter) != "Mn"
     )
 
-    return texto
 
+# ==========================================================
+# FECHAS
+# ==========================================================
 
 DIAS_SEMANA = {
     "lunes": 0,
@@ -108,12 +109,12 @@ def convertir_fecha(texto_fecha):
     if not texto_fecha:
         return None
 
-    texto_original = texto_fecha.strip()
+    original = texto_fecha.strip()
 
-    if not texto_original:
+    if not original:
         return None
 
-    texto = normalizar_texto(texto_original)
+    texto = normalizar_texto(original)
     hoy = date.today()
 
     if texto in ("hoy", "para hoy"):
@@ -145,16 +146,14 @@ def convertir_fecha(texto_fecha):
                 hoy + timedelta(days=diferencia)
             ).isoformat()
 
-    formatos = (
+    for formato in (
         "%Y-%m-%d",
         "%d/%m/%Y",
         "%d-%m-%Y",
-    )
-
-    for formato in formatos:
+    ):
         try:
             fecha = datetime.strptime(
-                texto_original,
+                original,
                 formato
             ).date()
 
@@ -170,20 +169,28 @@ def extraer_fecha_del_mensaje(mensaje):
     texto = normalizar_texto(mensaje)
 
     if "pasado manana" in texto:
-        return convertir_fecha("pasado mañana")
+        return convertir_fecha(
+            "pasado mañana"
+        )
 
     if "manana" in texto:
-        return convertir_fecha("mañana")
+        return convertir_fecha(
+            "mañana"
+        )
 
     if re.search(r"\bhoy\b", texto):
-        return convertir_fecha("hoy")
+        return convertir_fecha(
+            "hoy"
+        )
 
     for nombre_dia in DIAS_SEMANA:
         if re.search(
             rf"\b{nombre_dia}\b",
             texto
         ):
-            return convertir_fecha(nombre_dia)
+            return convertir_fecha(
+                nombre_dia
+            )
 
     coincidencia = re.search(
         r"\b\d{1,2}/\d{1,2}/\d{4}\b",
@@ -206,53 +213,6 @@ def extraer_fecha_del_mensaje(mensaje):
         )
 
     return None
-
-
-def descripcion_es_solo_fecha(descripcion):
-    if not descripcion:
-        return False
-
-    texto = normalizar_texto(descripcion)
-
-    expresiones = {
-        "hoy",
-        "para hoy",
-        "manana",
-        "para manana",
-        "pasado manana",
-        "para pasado manana",
-        "lunes",
-        "el lunes",
-        "martes",
-        "el martes",
-        "miercoles",
-        "el miercoles",
-        "jueves",
-        "el jueves",
-        "viernes",
-        "el viernes",
-        "sabado",
-        "el sabado",
-        "domingo",
-        "el domingo",
-    }
-
-    if texto in expresiones:
-        return True
-
-    if re.fullmatch(
-        r"\d{1,2}/\d{1,2}/\d{4}",
-        texto
-    ):
-        return True
-
-    if re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}",
-        texto
-    ):
-        return True
-
-    return False
 
 
 def fecha_para_mostrar(fecha_iso):
@@ -282,6 +242,52 @@ def fecha_para_mostrar(fecha_iso):
     return fecha.strftime("%d/%m/%Y")
 
 
+# ==========================================================
+# HORAS
+# ==========================================================
+
+def extraer_horas_del_mensaje(mensaje):
+    texto = normalizar_texto(mensaje)
+
+    rango = re.search(
+        r"(?:de|desde)\s+(\d{1,2})(?::(\d{2}))?\s+"
+        r"(?:a|hasta)\s+(\d{1,2})(?::(\d{2}))?",
+        texto
+    )
+
+    if rango:
+        h1 = int(rango.group(1))
+        m1 = int(rango.group(2) or 0)
+
+        h2 = int(rango.group(3))
+        m2 = int(rango.group(4) or 0)
+
+        return (
+            f"{h1:02d}:{m1:02d}",
+            f"{h2:02d}:{m2:02d}",
+        )
+
+    simple = re.search(
+        r"(?:a las|a la)\s+(\d{1,2})(?::(\d{2}))?",
+        texto
+    )
+
+    if simple:
+        hora = int(simple.group(1))
+        minuto = int(simple.group(2) or 0)
+
+        return (
+            f"{hora:02d}:{minuto:02d}",
+            None,
+        )
+
+    return None, None
+
+
+# ==========================================================
+# MEMORIA
+# ==========================================================
+
 def obtener_texto_memoria():
     recuerdos = obtener_recuerdos()
 
@@ -291,15 +297,15 @@ def obtener_texto_memoria():
             "guardados todavía."
         )
 
-    lineas = []
+    return "\n".join(
+        f"- [{categoria}] {clave}: {valor}"
+        for categoria, clave, valor in recuerdos
+    )
 
-    for categoria, clave, valor in recuerdos:
-        lineas.append(
-            f"- [{categoria}] {clave}: {valor}"
-        )
 
-    return "\n".join(lineas)
-
+# ==========================================================
+# TAREAS
+# ==========================================================
 
 def obtener_texto_tareas():
     tareas = obtener_tareas_pendientes()
@@ -335,7 +341,7 @@ def obtener_texto_tareas():
     return "\n".join(lineas)
 
 
-def formatear_lista_tareas(
+def formatear_tareas(
     tareas,
     encabezado
 ):
@@ -363,8 +369,66 @@ def formatear_lista_tareas(
             )
 
         if descripcion:
+            texto += f" — {descripcion}"
+
+        lineas.append(texto)
+
+    return "\n".join(lineas)
+
+
+def mostrar_tareas_pendientes():
+    return formatear_tareas(
+        obtener_tareas_pendientes(),
+        "Tus tareas pendientes son:"
+    )
+
+
+# ==========================================================
+# EVENTOS
+# ==========================================================
+
+def obtener_texto_eventos():
+    eventos = obtener_eventos_activos()
+
+    if not eventos:
+        return "No hay eventos próximos."
+
+    lineas = []
+
+    for (
+        evento_id,
+        titulo,
+        descripcion,
+        fecha,
+        hora_inicio,
+        hora_fin,
+        estado,
+    ) in eventos:
+
+        texto = (
+            f"- ID {evento_id}: "
+            f"{titulo}"
+        )
+
+        if fecha:
             texto += (
-                f" — {descripcion}"
+                f" | fecha: "
+                f"{fecha_para_mostrar(fecha)}"
+            )
+
+        if hora_inicio:
+            texto += (
+                f" | hora: {hora_inicio}"
+            )
+
+        if hora_fin:
+            texto += (
+                f" a {hora_fin}"
+            )
+
+        if descripcion:
+            texto += (
+                f" | detalle: {descripcion}"
             )
 
         lineas.append(texto)
@@ -372,44 +436,152 @@ def formatear_lista_tareas(
     return "\n".join(lineas)
 
 
-def mostrar_todas_las_tareas():
-    return formatear_lista_tareas(
-        obtener_tareas_pendientes(),
-        "Tus tareas pendientes son:"
+def formatear_eventos(
+    eventos,
+    encabezado
+):
+    if not eventos:
+        return (
+            "No encontré eventos "
+            "para ese período."
+        )
+
+    lineas = [encabezado]
+
+    for (
+        evento_id,
+        titulo,
+        descripcion,
+        fecha,
+        hora_inicio,
+        hora_fin,
+        estado,
+    ) in eventos:
+
+        texto = (
+            f"{evento_id}. {titulo}"
+            f" — {fecha_para_mostrar(fecha)}"
+        )
+
+        if hora_inicio:
+            texto += f" — {hora_inicio}"
+
+        if hora_fin:
+            texto += f" a {hora_fin}"
+
+        if descripcion:
+            texto += f" — {descripcion}"
+
+        lineas.append(texto)
+
+    return "\n".join(lineas)
+
+
+def mostrar_eventos_activos():
+    return formatear_eventos(
+        obtener_eventos_activos(),
+        "Tus próximos eventos son:"
     )
 
 
-def mostrar_tareas_hoy():
+# ==========================================================
+# AGENDA
+# ==========================================================
+
+def agenda_para_fecha(
+    fecha_iso,
+    nombre_periodo
+):
     tareas = obtener_tareas_por_fecha(
-        date.today().isoformat()
+        fecha_iso
     )
 
-    return formatear_lista_tareas(
-        tareas,
-        "Tus tareas para hoy son:"
+    eventos = obtener_eventos_por_fecha(
+        fecha_iso
+    )
+
+    if not tareas and not eventos:
+        return (
+            f"No tenés tareas ni eventos "
+            f"para {nombre_periodo}."
+        )
+
+    lineas = [
+        f"Tu agenda para {nombre_periodo}:"
+    ]
+
+    if eventos:
+        lineas.append("")
+        lineas.append("Eventos:")
+
+        for (
+            evento_id,
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado,
+        ) in eventos:
+
+            texto = (
+                f"- #{evento_id} {titulo}"
+            )
+
+            if hora_inicio:
+                texto += (
+                    f" — {hora_inicio}"
+                )
+
+            if hora_fin:
+                texto += (
+                    f" a {hora_fin}"
+                )
+
+            lineas.append(texto)
+
+    if tareas:
+        lineas.append("")
+        lineas.append("Tareas:")
+
+        for (
+            tarea_id,
+            titulo,
+            descripcion,
+            fecha,
+            estado,
+        ) in tareas:
+
+            lineas.append(
+                f"- #{tarea_id} {titulo}"
+            )
+
+    return "\n".join(lineas)
+
+
+def agenda_hoy():
+    return agenda_para_fecha(
+        date.today().isoformat(),
+        "hoy"
     )
 
 
-def mostrar_tareas_manana():
-    fecha_manana = (
+def agenda_manana():
+    fecha = (
         date.today()
         + timedelta(days=1)
     ).isoformat()
 
-    tareas = obtener_tareas_por_fecha(
-        fecha_manana
-    )
-
-    return formatear_lista_tareas(
-        tareas,
-        "Tus tareas para mañana son:"
+    return agenda_para_fecha(
+        fecha,
+        "mañana"
     )
 
 
-def mostrar_tareas_semana():
+def agenda_semana():
     hoy = date.today()
 
-    fin_semana = (
+    fin = (
         hoy
         + timedelta(
             days=6 - hoy.weekday()
@@ -418,23 +590,89 @@ def mostrar_tareas_semana():
 
     tareas = obtener_tareas_entre_fechas(
         hoy.isoformat(),
-        fin_semana.isoformat()
+        fin.isoformat()
     )
 
-    return formatear_lista_tareas(
-        tareas,
-        "Tus tareas para esta semana son:"
+    eventos = obtener_eventos_entre_fechas(
+        hoy.isoformat(),
+        fin.isoformat()
     )
 
+    if not tareas and not eventos:
+        return (
+            "No tenés tareas ni eventos "
+            "para esta semana."
+        )
 
-def es_consulta_tareas_hoy(mensaje):
-    texto = normalizar_texto(mensaje)
+    lineas = [
+        "Tu agenda para esta semana:"
+    ]
+
+    if eventos:
+        lineas.append("")
+        lineas.append("Eventos:")
+
+        for (
+            evento_id,
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado,
+        ) in eventos:
+
+            texto = (
+                f"- {fecha_para_mostrar(fecha)}: "
+                f"#{evento_id} {titulo}"
+            )
+
+            if hora_inicio:
+                texto += (
+                    f" — {hora_inicio}"
+                )
+
+            if hora_fin:
+                texto += (
+                    f" a {hora_fin}"
+                )
+
+            lineas.append(texto)
+
+    if tareas:
+        lineas.append("")
+        lineas.append("Tareas:")
+
+        for (
+            tarea_id,
+            titulo,
+            descripcion,
+            fecha,
+            estado,
+        ) in tareas:
+
+            lineas.append(
+                f"- {fecha_para_mostrar(fecha)}: "
+                f"#{tarea_id} {titulo}"
+            )
+
+    return "\n".join(lineas)
+
+
+# ==========================================================
+# COMANDOS DIRECTOS
+# ==========================================================
+
+def es_consulta_hoy(mensaje):
+    texto = normalizar_texto(
+        mensaje
+    )
 
     patrones = (
+        "que tengo hoy",
         "que tengo para hoy",
-        "tareas para hoy",
-        "tareas de hoy",
-        "que tareas tengo hoy",
+        "agenda de hoy",
+        "agenda para hoy",
     )
 
     return any(
@@ -443,14 +681,16 @@ def es_consulta_tareas_hoy(mensaje):
     )
 
 
-def es_consulta_tareas_manana(mensaje):
-    texto = normalizar_texto(mensaje)
+def es_consulta_manana(mensaje):
+    texto = normalizar_texto(
+        mensaje
+    )
 
     patrones = (
+        "que tengo manana",
         "que tengo para manana",
-        "tareas para manana",
-        "tareas de manana",
-        "que tareas tengo manana",
+        "agenda de manana",
+        "agenda para manana",
     )
 
     return any(
@@ -459,14 +699,15 @@ def es_consulta_tareas_manana(mensaje):
     )
 
 
-def es_consulta_tareas_semana(mensaje):
-    texto = normalizar_texto(mensaje)
+def es_consulta_semana(mensaje):
+    texto = normalizar_texto(
+        mensaje
+    )
 
     patrones = (
         "que tengo esta semana",
-        "tareas de esta semana",
-        "tareas para esta semana",
-        "que tareas tengo esta semana",
+        "agenda de esta semana",
+        "agenda para esta semana",
     )
 
     return any(
@@ -475,18 +716,17 @@ def es_consulta_tareas_semana(mensaje):
     )
 
 
-def es_consulta_de_tareas(mensaje):
-    texto = normalizar_texto(mensaje)
+def es_consulta_tareas(mensaje):
+    texto = normalizar_texto(
+        mensaje
+    )
 
     patrones = (
         "que tareas tengo",
         "mis tareas",
         "tareas pendientes",
-        "mostrame las tareas",
-        "mostrame mis tareas",
-        "mostrar tareas",
         "listar tareas",
-        "lista de tareas",
+        "mostrar tareas",
     )
 
     return any(
@@ -495,23 +735,22 @@ def es_consulta_de_tareas(mensaje):
     )
 
 
-def es_orden_de_completar(mensaje):
-    texto = normalizar_texto(mensaje)
+def es_consulta_eventos(mensaje):
+    texto = normalizar_texto(
+        mensaje
+    )
 
-    palabras = (
-        "completar",
-        "completada",
-        "complete",
-        "termine",
-        "hecha",
-        "finalizar",
-        "finalice",
-        "marcar",
+    patrones = (
+        "que eventos tengo",
+        "mis eventos",
+        "proximos eventos",
+        "listar eventos",
+        "mostrar eventos",
     )
 
     return any(
-        palabra in texto
-        for palabra in palabras
+        patron in texto
+        for patron in patrones
     )
 
 
@@ -529,73 +768,148 @@ def extraer_id_tarea(mensaje):
     return None
 
 
-def procesar_comandos_directos(mensaje):
-    if es_consulta_tareas_hoy(mensaje):
-        return mostrar_tareas_hoy()
+def extraer_id_evento(mensaje):
+    coincidencia = re.search(
+        r"(?:evento\s*)?#?\s*(\d+)",
+        normalizar_texto(mensaje)
+    )
 
-    if es_consulta_tareas_manana(mensaje):
-        return mostrar_tareas_manana()
-
-    if es_consulta_tareas_semana(mensaje):
-        return mostrar_tareas_semana()
-
-    if es_consulta_de_tareas(mensaje):
-        return mostrar_todas_las_tareas()
-
-    if es_orden_de_completar(mensaje):
-        tarea_id = extraer_id_tarea(mensaje)
-
-        if tarea_id is None:
-            tareas = obtener_tareas_pendientes()
-
-            if not tareas:
-                return (
-                    "No tenés tareas pendientes "
-                    "para completar."
-                )
-
-            return (
-                "Indicame el número de la tarea "
-                "que querés completar.\n\n"
-                + mostrar_todas_las_tareas()
-            )
-
-        tarea = obtener_tarea_por_id(
-            tarea_id
+    if coincidencia:
+        return int(
+            coincidencia.group(1)
         )
-
-        if not tarea:
-            return (
-                f"No encontré una tarea "
-                f"con ID {tarea_id}."
-            )
-
-        if tarea[4] == "completada":
-            return (
-                f"La tarea #{tarea_id} ya estaba "
-                f"completada: {tarea[1]}."
-            )
-
-        if completar_tarea(tarea_id):
-            return (
-                f"Listo. Marqué como completada "
-                f"la tarea #{tarea_id}: "
-                f"{tarea[1]}."
-            )
 
     return None
 
 
-def necesita_modo_profundo(mensaje):
-    texto = normalizar_texto(mensaje)
+def procesar_comandos_directos(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
 
-    if texto.startswith("profundo:"):
+    if es_consulta_hoy(mensaje):
+        return agenda_hoy()
+
+    if es_consulta_manana(mensaje):
+        return agenda_manana()
+
+    if es_consulta_semana(mensaje):
+        return agenda_semana()
+
+    if es_consulta_tareas(mensaje):
+        return mostrar_tareas_pendientes()
+
+    if es_consulta_eventos(mensaje):
+        return mostrar_eventos_activos()
+
+    palabras_completar = (
+        "completar",
+        "complete",
+        "termine",
+        "marcar como hecha",
+    )
+
+    if any(
+        palabra in texto
+        for palabra in palabras_completar
+    ):
+        tarea_id = extraer_id_tarea(
+            mensaje
+        )
+
+        if tarea_id:
+            tarea = obtener_tarea_por_id(
+                tarea_id
+            )
+
+            if not tarea:
+                return (
+                    f"No encontré la tarea "
+                    f"#{tarea_id}."
+                )
+
+            if tarea[4] == "completada":
+                return (
+                    f"La tarea #{tarea_id} "
+                    f"ya estaba completada."
+                )
+
+            if completar_tarea(
+                tarea_id
+            ):
+                return (
+                    f"Listo. Completé la tarea "
+                    f"#{tarea_id}: "
+                    f"{tarea[1]}."
+                )
+
+    palabras_cancelar = (
+        "cancelar evento",
+        "cancela el evento",
+        "cancela evento",
+    )
+
+    if any(
+        palabra in texto
+        for palabra in palabras_cancelar
+    ):
+        evento_id = extraer_id_evento(
+            mensaje
+        )
+
+        if evento_id:
+            evento = obtener_evento_por_id(
+                evento_id
+            )
+
+            if not evento:
+                return (
+                    f"No encontré el evento "
+                    f"#{evento_id}."
+                )
+
+            if evento[6] == "cancelado":
+                return (
+                    f"El evento #{evento_id} "
+                    f"ya estaba cancelado."
+                )
+
+            if cancelar_evento(
+                evento_id
+            ):
+                return (
+                    f"Listo. Cancelé el evento "
+                    f"#{evento_id}: "
+                    f"{evento[1]}."
+                )
+
+    return None
+
+
+# ==========================================================
+# MODELOS
+# ==========================================================
+
+def necesita_modo_profundo(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if texto.startswith(
+        "profundo:"
+    ):
         return True
 
-    if texto.startswith("modo profundo:"):
+    if texto.startswith(
+        "modo profundo:"
+    ):
         return True
 
-    palabras_complejas = (
+    palabras = (
         "analiza en profundidad",
         "estrategia",
         "arquitectura",
@@ -607,7 +921,7 @@ def necesita_modo_profundo(mensaje):
 
     if any(
         palabra in texto
-        for palabra in palabras_complejas
+        for palabra in palabras
     ):
         return True
 
@@ -629,58 +943,31 @@ def elegir_modelo(mensaje):
     )
 
 
-def limpiar_comando_profundo(mensaje):
-    texto = mensaje.strip()
-
-    normalizado = normalizar_texto(
-        texto
-    )
-
-    if normalizado.startswith(
-        "profundo:"
-    ):
-        return texto.split(
-            ":",
-            1
-        )[1].strip()
-
-    if normalizado.startswith(
-        "modo profundo:"
-    ):
-        return texto.split(
-            ":",
-            1
-        )[1].strip()
-
-    return texto
-
+# ==========================================================
+# IA
+# ==========================================================
 
 def consultar_hermes(mensaje):
-    comando_directo = (
+    comando = (
         procesar_comandos_directos(
             mensaje
         )
     )
 
-    if comando_directo is not None:
+    if comando is not None:
         print(
             "Hermes ⚡ comando local..."
         )
 
-        return comando_directo
-
-    memoria = obtener_texto_memoria()
-    tareas = obtener_texto_tareas()
+        return comando
 
     modelo, modo = elegir_modelo(
         mensaje
     )
 
-    mensaje_limpio = (
-        limpiar_comando_profundo(
-            mensaje
-        )
-    )
+    memoria = obtener_texto_memoria()
+    tareas = obtener_texto_tareas()
+    eventos = obtener_texto_eventos()
 
     prompt = f"""
 {PROMPT_SISTEMA}
@@ -688,21 +975,22 @@ def consultar_hermes(mensaje):
 FECHA ACTUAL:
 {date.today().isoformat()}
 
-MEMORIA PERMANENTE DE LEO:
+MEMORIA:
 {memoria}
 
-TAREAS PENDIENTES:
+TAREAS:
 {tareas}
 
-MENSAJE ACTUAL DE LEO:
-{mensaje_limpio}
+EVENTOS:
+{eventos}
 
-Respondé SOLAMENTE con JSON válido.
+MENSAJE DE LEO:
+{mensaje}
 
-Usá exactamente esta estructura:
+Respondé solamente con JSON válido:
 
 {{
-    "respuesta": "respuesta natural de Hermes",
+    "respuesta": "respuesta natural",
     "accion": "ninguna",
     "guardar_memoria": false,
     "categoria": "",
@@ -710,24 +998,25 @@ Usá exactamente esta estructura:
     "valor": "",
     "tarea_titulo": "",
     "tarea_descripcion": "",
-    "tarea_fecha": ""
+    "evento_titulo": "",
+    "evento_descripcion": ""
 }}
 
-Las únicas acciones posibles son:
+Las acciones posibles son:
 
 "ninguna"
 "crear_tarea"
+"crear_evento"
 
-Usá "crear_tarea" solamente cuando Leo
-exprese una NUEVA obligación o pendiente.
+Elegí "crear_evento" para:
+- citas
+- reuniones
+- turnos
+- clases
+- actividades con fecha y hora
 
-No crees tareas a partir de tareas existentes
-que aparezcan en el contexto.
-
-No guardes una tarea también como recuerdo.
-
-No uses expresiones de fecha como descripción
-de una tarea.
+Elegí "crear_tarea" para pendientes
+o cosas por hacer.
 
 No escribas nada fuera del JSON.
 """
@@ -740,8 +1029,8 @@ No escribas nada fuera del JSON.
         "format": "json",
         "options": {
             "temperature": 0.1,
-            "num_ctx": 4096
-        }
+            "num_ctx": 4096,
+        },
     }
 
     print(
@@ -762,7 +1051,9 @@ No escribas nada fuera del JSON.
     ].strip()
 
     try:
-        resultado = json.loads(texto)
+        resultado = json.loads(
+            texto
+        )
 
     except json.JSONDecodeError:
         return texto
@@ -776,6 +1067,10 @@ No escribas nada fuera del JSON.
         "respuesta",
         "No pude generar una respuesta."
     )
+
+    # -------------------------
+    # CREAR TAREA
+    # -------------------------
 
     if accion == "crear_tarea":
         titulo = str(
@@ -792,34 +1087,17 @@ No escribas nada fuera del JSON.
             )
         ).strip()
 
-        if descripcion_es_solo_fecha(
-            descripcion
-        ):
-            descripcion = ""
-
-        fecha_texto = str(
-            resultado.get(
-                "tarea_fecha",
-                ""
-            )
-        ).strip()
-
-        fecha_iso = (
+        fecha = (
             extraer_fecha_del_mensaje(
-                mensaje_limpio
+                mensaje
             )
         )
-
-        if fecha_iso is None:
-            fecha_iso = convertir_fecha(
-                fecha_texto
-            )
 
         if titulo:
             tarea_id = crear_tarea(
                 titulo,
                 descripcion,
-                fecha_iso
+                fecha
             )
 
             print(
@@ -827,19 +1105,92 @@ No escribas nada fuera del JSON.
                 f"#{tarea_id}: {titulo}"
             )
 
-            if fecha_iso:
-                respuesta = (
-                    f"Listo. Agregué la tarea "
-                    f"#{tarea_id}: {titulo} "
-                    f"para "
-                    f"{fecha_para_mostrar(fecha_iso)}."
+            respuesta = (
+                f"Listo. Agregué la tarea "
+                f"#{tarea_id}: {titulo}."
+            )
+
+    # -------------------------
+    # CREAR EVENTO
+    # -------------------------
+
+    elif accion == "crear_evento":
+        titulo = str(
+            resultado.get(
+                "evento_titulo",
+                ""
+            )
+        ).strip()
+
+        descripcion = str(
+            resultado.get(
+                "evento_descripcion",
+                ""
+            )
+        ).strip()
+
+        fecha = (
+            extraer_fecha_del_mensaje(
+                mensaje
+            )
+        )
+
+        hora_inicio, hora_fin = (
+            extraer_horas_del_mensaje(
+                mensaje
+            )
+        )
+
+        if not fecha:
+            respuesta = (
+                "Entendí que querés crear "
+                "un evento, pero necesito "
+                "una fecha."
+            )
+
+        elif not titulo:
+            respuesta = (
+                "Entendí que querés crear "
+                "un evento, pero no pude "
+                "determinar el título."
+            )
+
+        else:
+            evento_id = crear_evento(
+                titulo=titulo,
+                fecha=fecha,
+                hora_inicio=hora_inicio,
+                hora_fin=hora_fin,
+                descripcion=descripcion,
+            )
+
+            print(
+                f"📅 Evento creado "
+                f"#{evento_id}: {titulo}"
+            )
+
+            respuesta = (
+                f"Listo. Agregué el evento "
+                f"#{evento_id}: {titulo} "
+                f"para "
+                f"{fecha_para_mostrar(fecha)}"
+            )
+
+            if hora_inicio:
+                respuesta += (
+                    f" a las {hora_inicio}"
                 )
 
-            else:
-                respuesta = (
-                    f"Listo. Agregué la tarea "
-                    f"#{tarea_id}: {titulo}."
+            if hora_fin:
+                respuesta += (
+                    f" hasta las {hora_fin}"
                 )
+
+            respuesta += "."
+
+    # -------------------------
+    # MEMORIA
+    # -------------------------
 
     if resultado.get(
         "guardar_memoria"
@@ -874,29 +1225,56 @@ No escribas nada fuera del JSON.
 
             if estado == "creado":
                 print(
-                    f"🧠 Hermes recordó: {valor}"
+                    f"🧠 Hermes recordó: "
+                    f"{valor}"
                 )
 
             elif estado == "actualizado":
                 print(
-                    f"🧠 Hermes actualizó: {valor}"
+                    f"🧠 Hermes actualizó: "
+                    f"{valor}"
                 )
 
     return respuesta
 
 
+# ==========================================================
+# INICIO
+# ==========================================================
+
 print()
-print("════════════════════════════════")
-print("            HERMES")
-print("════════════════════════════════")
+print(
+    "════════════════════════════════"
+)
+print(
+    "            HERMES"
+)
+print(
+    "════════════════════════════════"
+)
 print()
-print("⚡ Cerebro rápido: qwen3:1.7b")
-print("🧠 Cerebro profundo: qwen3:4b")
-print("🧠 Memoria permanente: activa")
-print("✅ Gestión de tareas: activa")
-print("📅 Fechas inteligentes: activas")
+print(
+    "⚡ Cerebro rápido: qwen3:1.7b"
+)
+print(
+    "🧠 Cerebro profundo: qwen3:4b"
+)
+print(
+    "🧠 Memoria permanente: activa"
+)
+print(
+    "✅ Gestión de tareas: activa"
+)
+print(
+    "📅 Fechas inteligentes: activas"
+)
+print(
+    "🗓️ Agenda y eventos: activos"
+)
 print()
-print("Escribí 'salir' para terminar.")
+print(
+    "Escribí 'salir' para terminar."
+)
 print()
 
 
@@ -913,7 +1291,6 @@ while True:
         print(
             "Hermes: Hasta luego, Leo."
         )
-
         break
 
     try:
