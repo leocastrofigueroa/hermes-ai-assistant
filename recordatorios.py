@@ -130,7 +130,10 @@ def obtener_recordatorios_de_evento(
         FROM recordatorios
         WHERE evento_id = ?
           AND estado = 'pendiente'
-        ORDER BY fecha_hora ASC
+        ORDER BY
+            anticipacion_minutos DESC,
+            fecha_hora ASC,
+            id ASC
     """, (
         evento_id,
     ))
@@ -314,6 +317,72 @@ def modificar_recordatorio(
         titulo_final,
         mensaje_final,
         nueva_fecha_hora,
+        recordatorio_id
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizado",
+        recordatorio_id
+    )
+
+
+def actualizar_recordatorio_vinculado(
+    recordatorio_id,
+    nueva_fecha_hora,
+    anticipacion_minutos,
+    nuevo_mensaje=None
+):
+    actual = obtener_recordatorio_por_id(
+        recordatorio_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[4] != "pendiente":
+        return (
+            "no_pendiente",
+            recordatorio_id
+        )
+
+    mensaje_final = (
+        nuevo_mensaje.strip()
+        if nuevo_mensaje is not None
+        else (actual[2] or "")
+    )
+
+    duplicado = buscar_recordatorio_pendiente(
+        actual[1],
+        nueva_fecha_hora,
+        excluir_id=recordatorio_id
+    )
+
+    if duplicado:
+        return (
+            "duplicado",
+            duplicado[0]
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE recordatorios
+        SET fecha_hora = ?,
+            mensaje = ?,
+            anticipacion_minutos = ?
+        WHERE id = ?
+          AND estado = 'pendiente'
+    """, (
+        nueva_fecha_hora,
+        mensaje_final,
+        anticipacion_minutos,
         recordatorio_id
     ))
 
