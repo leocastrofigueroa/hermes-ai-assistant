@@ -49,6 +49,7 @@ crear_tabla_recordatorios()
 
 
 confirmacion_pendiente = None
+ultimo_contexto_edicion = None
 
 
 PROMPT_SISTEMA = """
@@ -126,6 +127,8 @@ def es_respuesta_dependiente_sin_contexto(
         r"^(ese|esa|este|esta)\s+",
         r"^(el|la)\s+#?\d+\s*$",
         r"^(el|la)\s+recordatorio\s+#?\d+\s*$",
+        r"^(?:ahora|despues|luego)\s+(?:dejalo|dejala|correlo|correla|movelo|movela|muevelo|muevela|cambialo|cambiala|pasalo|pasala)\b",
+        r"^(?:ahora|despues|luego)\s+(?:ese|esa|eso|este|esta)\b",
     )
 
     for patron in patrones:
@@ -173,6 +176,333 @@ def respuesta_contexto_faltante(
         f"No tengo una acción pendiente a la que pueda "
         f"asociar “{mensaje.strip()}”. "
         f"Decime a qué te referís."
+    )
+
+
+def guardar_contexto_edicion(
+    tipo,
+    elemento_id
+):
+    global ultimo_contexto_edicion
+
+    ultimo_contexto_edicion = {
+        "tipo": tipo,
+        "id": elemento_id,
+    }
+
+
+def limpiar_contexto_edicion():
+    global ultimo_contexto_edicion
+    ultimo_contexto_edicion = None
+
+
+def es_edicion_contextual(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    pronombres_accion = (
+        "dejalo",
+        "dejala",
+        "correlo",
+        "correla",
+        "movelo",
+        "movela",
+        "muevelo",
+        "muevela",
+        "cambialo",
+        "cambiala",
+        "pasalo",
+        "pasala",
+        "adelantalo",
+        "adelantala",
+        "retrasalo",
+        "retrasala",
+    )
+
+    if any(
+        re.search(
+            rf"\b{re.escape(palabra)}\b",
+            texto
+        )
+        for palabra in pronombres_accion
+    ):
+        return True
+
+    if re.search(
+        r"^(?:ahora|despues|luego)\s+"
+        r"(?:ese|esa|eso|este|esta)\b",
+        texto
+    ):
+        return True
+
+    if re.search(
+        r"^(?:ese|esa|eso|este|esta)\b",
+        texto
+    ):
+        return True
+
+    # También aceptamos una acción seguida de un pronombre contextual.
+    # Ejemplos: "Mové eso al viernes a las 18" o
+    # "Cambiá ese para mañana".
+    if re.search(
+        r"^(?:move|mover|cambia|cambiar|pasa|pasar|"
+        r"corre|correr|adelanta|adelantar|retrasa|retrasar)\s+"
+        r"(?:ese|esa|eso|este|esta)\b",
+        texto
+    ):
+        return True
+
+    return False
+
+
+def procesar_edicion_contextual(
+    mensaje
+):
+    global ultimo_contexto_edicion
+
+    if ultimo_contexto_edicion is None:
+        return respuesta_contexto_faltante(
+            mensaje
+        )
+
+    tipo = ultimo_contexto_edicion.get(
+        "tipo"
+    )
+
+    elemento_id = ultimo_contexto_edicion.get(
+        "id"
+    )
+
+    if tipo == "evento":
+        evento = obtener_evento_por_id(
+            elemento_id
+        )
+
+        if not evento or evento[6] != "activo":
+            limpiar_contexto_edicion()
+            return (
+                "El evento al que te referías "
+                "ya no está disponible."
+            )
+
+        desplazamiento = extraer_desplazamiento_evento_minutos(
+            mensaje
+        )
+
+        if desplazamiento is not None:
+            mensaje_completo = (
+                f"{mensaje} {evento[1]}"
+            )
+
+            respuesta = mover_evento_relativamente_desde_mensaje(
+                mensaje_completo
+            )
+
+            if respuesta.startswith("Listo."):
+                guardar_contexto_edicion(
+                    "evento",
+                    evento[0]
+                )
+
+            return respuesta
+
+        fecha_nueva = extraer_fecha_del_mensaje(
+            mensaje
+        )
+
+        hora_nueva, hora_fin_nueva = extraer_horas_del_mensaje(
+            mensaje
+        )
+
+        if fecha_nueva or hora_nueva:
+            respuesta = aplicar_modificacion_evento(
+                evento=evento,
+                fecha_nueva=fecha_nueva,
+                hora_nueva=hora_nueva,
+                hora_fin_nueva=hora_fin_nueva,
+            )
+
+            if respuesta.startswith("Listo."):
+                guardar_contexto_edicion(
+                    "evento",
+                    evento[0]
+                )
+
+            return respuesta
+
+        return (
+            f"Entiendo que te referís a {evento[1]}, "
+            f"pero necesito que me digas qué cambio querés hacer."
+        )
+
+    if tipo == "recordatorio":
+        recordatorio = obtener_recordatorio_por_id(
+            elemento_id
+        )
+
+        if not recordatorio or recordatorio[4] != "pendiente":
+            limpiar_contexto_edicion()
+            return (
+                "El recordatorio al que te referías "
+                "ya no está pendiente."
+            )
+
+        mensaje_completo = (
+            f"{mensaje} recordatorio #{recordatorio[0]}"
+        )
+
+        desplazamiento = extraer_desplazamiento_recordatorio_minutos(
+            mensaje_completo
+        )
+
+        if desplazamiento is not None:
+            respuesta = mover_recordatorio_relativamente_desde_mensaje(
+                mensaje_completo
+            )
+
+            if respuesta.startswith("Listo."):
+                guardar_contexto_edicion(
+                    "recordatorio",
+                    recordatorio[0]
+                )
+
+            return respuesta
+
+        fecha_nueva = extraer_fecha_del_mensaje(
+            mensaje
+        )
+
+        hora_nueva, _ = extraer_horas_del_mensaje(
+            mensaje
+        )
+
+        if fecha_nueva or hora_nueva:
+            mensaje_completo = (
+                f"Cambiá el recordatorio #{recordatorio[0]} "
+                f"{mensaje}"
+            )
+
+            respuesta = modificar_recordatorio_desde_mensaje(
+                mensaje_completo
+            )
+
+            if respuesta.startswith("Listo."):
+                guardar_contexto_edicion(
+                    "recordatorio",
+                    recordatorio[0]
+                )
+
+            return respuesta
+
+        return (
+            f"Entiendo que te referís al recordatorio "
+            f"#{recordatorio[0]}: {recordatorio[1]}, "
+            f"pero necesito que me digas qué cambio querés hacer."
+        )
+
+    limpiar_contexto_edicion()
+
+    return respuesta_contexto_faltante(
+        mensaje
+    )
+
+
+def autoriza_creacion_tarea_desde_modelo(
+    mensaje
+):
+    """
+    Permite que el modelo cree una tarea solamente cuando
+    el propio mensaje de Leo contiene una intención clara
+    de agregar algo pendiente.
+
+    Esto evita que frases descriptivas o respuestas copiadas
+    se conviertan accidentalmente en tareas.
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"\btengo que\b",
+        r"\bdebo\b",
+        r"\bnecesito\b",
+        r"\bme falta\b",
+        r"\bpendiente\b",
+        r"\bagrega(?:me)?(?: una)? tarea\b",
+        r"\banota(?:me)?(?: esto)? como tarea\b",
+        r"\bcrea(?:me)?(?: una)? tarea\b",
+        r"\bpon(?:e|eme)?(?: esto)? como tarea\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto
+        )
+        for patron in patrones
+    )
+
+
+def autoriza_creacion_evento_desde_modelo(
+    mensaje
+):
+    """
+    Permite crear eventos desde el modelo solo cuando el
+    mensaje expresa claramente que hay que agendar algo.
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones_explicitos = (
+        r"\bagrega(?:me)?(?: un)? evento\b",
+        r"\banota(?:me)?(?: esto)? como evento\b",
+        r"\bcrea(?:me)?(?: un)? evento\b",
+        r"\bagenda(?:me)?\b",
+        r"\bprograma(?:me)?\b",
+    )
+
+    if any(
+        re.search(
+            patron,
+            texto
+        )
+        for patron in patrones_explicitos
+    ):
+        return True
+
+    # También permitimos expresiones naturales del tipo
+    # "mañana a las 10 tengo dentista".
+    tiene_fecha = (
+        extraer_fecha_del_mensaje(
+            mensaje
+        )
+        is not None
+    )
+
+    tiene_hora = (
+        extraer_horas_del_mensaje(
+            mensaje
+        )[0]
+        is not None
+    )
+
+    habla_de_compromiso = bool(
+        re.search(
+            r"\b(tengo|tenemos)\b",
+            texto
+        )
+    )
+
+    return (
+        tiene_fecha
+        and tiene_hora
+        and habla_de_compromiso
     )
 
 
@@ -1875,6 +2205,308 @@ def procesar_cancelacion_recordatorio_ambiguo(
 # MODIFICAR RECORDATORIOS NORMALES
 # ==========================================================
 
+def extraer_desplazamiento_recordatorio_minutos(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if "recordatorio" not in texto:
+        return None
+
+    acciones = (
+        "mover",
+        "mueve",
+        "move",
+        "muevelo",
+        "muevela",
+        "pasalo",
+        "pasala",
+        "pasa",
+        "correr",
+        "corre",
+        "correlo",
+        "correla",
+        "retrasa",
+        "retrasalo",
+        "retrasala",
+        "adelanta",
+        "adelantalo",
+        "adelantala",
+    )
+
+    if not any(
+        accion in texto
+        for accion in acciones
+    ):
+        return None
+
+    minutos = None
+
+    if "media hora" in texto:
+        minutos = 30
+
+    elif re.search(
+        r"\b(?:una|un)\s+hora\b",
+        texto
+    ):
+        minutos = 60
+
+    else:
+        coincidencia = re.search(
+            r"\b(\d+)\s*"
+            r"(minuto|minutos|hora|horas)\b",
+            texto
+        )
+
+        if coincidencia:
+            cantidad = int(
+                coincidencia.group(1)
+            )
+
+            unidad = coincidencia.group(2)
+
+            if unidad.startswith(
+                "hora"
+            ):
+                minutos = cantidad * 60
+
+            else:
+                minutos = cantidad
+
+    if minutos is None:
+        return None
+
+    hacia_antes = any(
+        expresion in texto
+        for expresion in (
+            " mas temprano",
+            " antes",
+            "adelanta",
+            "adelantalo",
+            "adelantala",
+        )
+    )
+
+    hacia_despues = any(
+        expresion in texto
+        for expresion in (
+            " mas tarde",
+            " despues",
+            "retrasa",
+            "retrasalo",
+            "retrasala",
+        )
+    )
+
+    if hacia_antes:
+        return -minutos
+
+    if hacia_despues:
+        return minutos
+
+    if any(
+        accion in texto
+        for accion in (
+            "correr",
+            "corre",
+            "correlo",
+            "correla",
+        )
+    ):
+        return minutos
+
+    return None
+
+
+def es_desplazamiento_relativo_recordatorio(
+    mensaje
+):
+    return (
+        extraer_desplazamiento_recordatorio_minutos(
+            mensaje
+        )
+        is not None
+    )
+
+
+def obtener_recordatorio_objetivo_para_edicion(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    coincidencia = re.search(
+        r"recordatorio\s*#?\s*(\d+)",
+        texto
+    )
+
+    if coincidencia:
+        recordatorio_id = int(
+            coincidencia.group(1)
+        )
+
+        actual = obtener_recordatorio_por_id(
+            recordatorio_id
+        )
+
+        if actual:
+            return actual, None
+
+        return None, (
+            f"No encontré el recordatorio "
+            f"#{recordatorio_id}."
+        )
+
+    candidatos = buscar_recordatorios_candidatos(
+        mensaje
+    )
+
+    if not candidatos:
+        return None, (
+            "No pude identificar qué "
+            "recordatorio querés modificar."
+        )
+
+    if len(candidatos) > 1:
+        opciones = []
+
+        for recordatorio in candidatos:
+            try:
+                momento = datetime.fromisoformat(
+                    recordatorio[3]
+                )
+                detalle = (
+                    f"{fecha_para_mostrar(momento.date().isoformat())} "
+                    f"a las {momento.strftime('%H:%M')}"
+                )
+            except ValueError:
+                detalle = recordatorio[3]
+
+            opciones.append(
+                f"#{recordatorio[0]} ({detalle})"
+            )
+
+        return None, (
+            "Encontré varios recordatorios posibles: "
+            + ", ".join(opciones)
+            + ". Decime el número del que querés modificar."
+        )
+
+    return candidatos[0], None
+
+
+def validar_recordatorio_editable_independientemente(
+    recordatorio
+):
+    evento_id = recordatorio[5]
+
+    if evento_id is None:
+        return None
+
+    evento = obtener_evento_por_id(
+        evento_id
+    )
+
+    if evento:
+        return (
+            f"Ese recordatorio está vinculado al evento "
+            f"{evento[1]}. Para mantenerlos sincronizados, "
+            f"mové el evento o cambiá la anticipación del aviso."
+        )
+
+    return (
+        "Ese recordatorio está vinculado a un evento. "
+        "Para mantener la sincronización, modificá el evento "
+        "o la anticipación del aviso."
+    )
+
+
+def mover_recordatorio_relativamente_desde_mensaje(
+    mensaje
+):
+    actual, error = obtener_recordatorio_objetivo_para_edicion(
+        mensaje
+    )
+
+    if error:
+        return error
+
+    bloqueo = validar_recordatorio_editable_independientemente(
+        actual
+    )
+
+    if bloqueo:
+        return bloqueo
+
+    desplazamiento = extraer_desplazamiento_recordatorio_minutos(
+        mensaje
+    )
+
+    if desplazamiento is None:
+        return (
+            "No pude interpretar cuánto tiempo "
+            "querés mover el recordatorio."
+        )
+
+    momento_actual = datetime.fromisoformat(
+        actual[3]
+    )
+
+    momento_nuevo = (
+        momento_actual
+        + timedelta(
+            minutes=desplazamiento
+        )
+    )
+
+    if momento_nuevo <= datetime.now():
+        return (
+            "El nuevo momento del recordatorio "
+            "ya pasó."
+        )
+
+    estado, resultado_id = modificar_recordatorio(
+        actual[0],
+        momento_nuevo.replace(
+            microsecond=0
+        ).isoformat()
+    )
+
+    if estado == "duplicado":
+        return (
+            f"Ya existe un recordatorio "
+            f"igual como #{resultado_id}."
+        )
+
+    if estado == "no_pendiente":
+        return (
+            f"El recordatorio #{actual[0]} "
+            f"ya no está pendiente."
+        )
+
+    cantidad = abs(
+        desplazamiento
+    )
+
+    direccion = (
+        "más tarde"
+        if desplazamiento > 0
+        else "más temprano"
+    )
+
+    return (
+        f"Listo. Moví el recordatorio "
+        f"#{actual[0]}: {actual[1]} a "
+        f"{fecha_para_mostrar(momento_nuevo.date().isoformat())} "
+        f"a las {momento_nuevo.strftime('%H:%M')}. "
+        f"Lo moví {descripcion_anticipacion(cantidad)} "
+        f"{direccion}."
+    )
+
+
 def es_modificacion_recordatorio(
     mensaje
 ):
@@ -1893,9 +2525,15 @@ def es_modificacion_recordatorio(
                 "modifica",
                 "modificar",
                 "mueve",
+                "move",
                 "mover",
                 "pasa",
                 "pasalo",
+                "pasala",
+                "corre",
+                "correr",
+                "correlo",
+                "correla",
             )
         )
     )
@@ -1904,48 +2542,21 @@ def es_modificacion_recordatorio(
 def modificar_recordatorio_desde_mensaje(
     mensaje
 ):
-    texto = normalizar_texto(
+    actual, error = obtener_recordatorio_objetivo_para_edicion(
         mensaje
     )
 
-    coincidencia = re.search(
-        r"recordatorio\s*#?\s*(\d+)",
-        texto
+    if error:
+        return error
+
+    bloqueo = validar_recordatorio_editable_independientemente(
+        actual
     )
 
-    actual = None
-    recordatorio_id = None
+    if bloqueo:
+        return bloqueo
 
-    if coincidencia:
-
-        recordatorio_id = int(
-            coincidencia.group(1)
-        )
-
-        actual = obtener_recordatorio_por_id(
-            recordatorio_id
-        )
-
-    else:
-
-        actual = buscar_recordatorio_desde_mensaje(
-            mensaje
-        )
-
-        if actual:
-
-            recordatorio_id = actual[0]
-
-            actual = obtener_recordatorio_por_id(
-                recordatorio_id
-            )
-
-    if not actual:
-
-        return (
-            "No pude identificar qué "
-            "recordatorio querés modificar."
-        )
+    recordatorio_id = actual[0]
 
     fecha_nueva = extraer_fecha_del_mensaje(
         mensaje
@@ -2440,6 +3051,229 @@ def procesar_confirmacion_aviso(
 # MODIFICAR EVENTOS
 # ==========================================================
 
+def extraer_desplazamiento_evento_minutos(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if (
+        "recordatorio" in texto
+        or "aviso" in texto
+    ):
+        return None
+
+    acciones = (
+        "mover",
+        "move",
+        "muevelo",
+        "muevela",
+        "pasalo",
+        "pasala",
+        "pasa",
+        "correr",
+        "corre",
+        "correlo",
+        "correla",
+        "retrasa",
+        "retrasalo",
+        "retrasala",
+        "adelanta",
+        "adelantalo",
+        "adelantala",
+    )
+
+    if not any(
+        accion in texto
+        for accion in acciones
+    ):
+        return None
+
+    minutos = None
+
+    if "media hora" in texto:
+        minutos = 30
+
+    elif re.search(
+        r"\b(?:una|un)\s+hora\b",
+        texto
+    ):
+        minutos = 60
+
+    else:
+        coincidencia = re.search(
+            r"\b(\d+)\s*"
+            r"(minuto|minutos|hora|horas)\b",
+            texto
+        )
+
+        if coincidencia:
+            cantidad = int(
+                coincidencia.group(1)
+            )
+
+            unidad = coincidencia.group(2)
+
+            if unidad.startswith(
+                "hora"
+            ):
+                minutos = cantidad * 60
+
+            else:
+                minutos = cantidad
+
+    if minutos is None:
+        return None
+
+    hacia_antes = any(
+        expresion in texto
+        for expresion in (
+            " mas temprano",
+            " antes",
+            "adelanta",
+            "adelantalo",
+            "adelantala",
+        )
+    )
+
+    hacia_despues = any(
+        expresion in texto
+        for expresion in (
+            " mas tarde",
+            " despues",
+            "retrasa",
+            "retrasalo",
+            "retrasala",
+        )
+    )
+
+    if hacia_antes:
+        return -minutos
+
+    if hacia_despues:
+        return minutos
+
+    # En frases como "Corré el dentista 30 minutos",
+    # interpretamos "correr" como desplazarlo hacia adelante.
+    if any(
+        accion in texto
+        for accion in (
+            "correr",
+            "corre",
+            "correlo",
+            "correla",
+        )
+    ):
+        return minutos
+
+    return None
+
+
+def es_desplazamiento_relativo_evento(
+    mensaje
+):
+    return (
+        extraer_desplazamiento_evento_minutos(
+            mensaje
+        )
+        is not None
+    )
+
+
+def mover_evento_relativamente_desde_mensaje(
+    mensaje
+):
+    evento = buscar_evento_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+        return (
+            "No pude identificar qué "
+            "evento querés mover."
+        )
+
+    if not evento[3] or not evento[4]:
+        return (
+            f"El evento {evento[1]} "
+            f"no tiene fecha u hora suficiente "
+            f"para moverlo de forma relativa."
+        )
+
+    desplazamiento = extraer_desplazamiento_evento_minutos(
+        mensaje
+    )
+
+    if desplazamiento is None:
+        return (
+            "No pude interpretar cuánto tiempo "
+            "querés mover el evento."
+        )
+
+    momento_actual = datetime.fromisoformat(
+        f"{evento[3]}T{evento[4]}:00"
+    )
+
+    momento_nuevo = (
+        momento_actual
+        + timedelta(
+            minutes=desplazamiento
+        )
+    )
+
+    hora_fin_nueva = None
+
+    if evento[5]:
+        momento_fin_actual = datetime.fromisoformat(
+            f"{evento[3]}T{evento[5]}:00"
+        )
+
+        if momento_fin_actual < momento_actual:
+            momento_fin_actual += timedelta(
+                days=1
+            )
+
+        momento_fin_nuevo = (
+            momento_fin_actual
+            + timedelta(
+                minutes=desplazamiento
+            )
+        )
+
+        hora_fin_nueva = momento_fin_nuevo.strftime(
+            "%H:%M"
+        )
+
+    respuesta = aplicar_modificacion_evento(
+        evento=evento,
+        fecha_nueva=momento_nuevo.date().isoformat(),
+        hora_nueva=momento_nuevo.strftime("%H:%M"),
+        hora_fin_nueva=hora_fin_nueva,
+    )
+
+    if respuesta.startswith(
+        "Listo."
+    ):
+        cantidad = abs(
+            desplazamiento
+        )
+
+        direccion = (
+            "más tarde"
+            if desplazamiento > 0
+            else "más temprano"
+        )
+
+        return (
+            respuesta
+            + f" Lo moví {descripcion_anticipacion(cantidad)} "
+            + f"{direccion}."
+        )
+
+    return respuesta
+
+
 def es_modificacion_evento(
     mensaje
 ):
@@ -2464,6 +3298,8 @@ def es_modificacion_evento(
             "cambia",
             "cambialo",
             "cambiala",
+            "pasa",
+            "pasar",
             "pasalo",
             "pasala",
         )
@@ -3157,10 +3993,22 @@ def procesar_comandos_directos(
     mensaje
 ):
     global confirmacion_pendiente
+    global ultimo_contexto_edicion
 
     texto = normalizar_texto(
         mensaje
     )
+
+    if es_edicion_contextual(
+        mensaje
+    ):
+        return procesar_edicion_contextual(
+            mensaje
+        )
+
+    # El contexto de edición sirve para el seguimiento inmediato.
+    # Si Leo inicia otra orden distinta, dejamos de arrastrarlo.
+    ultimo_contexto_edicion = None
 
     if (
         confirmacion_pendiente is not None
@@ -3239,13 +4087,49 @@ def procesar_comandos_directos(
             mensaje
         )
 
+    if es_desplazamiento_relativo_recordatorio(
+        mensaje
+    ):
+        actual, _ = obtener_recordatorio_objetivo_para_edicion(
+            mensaje
+        )
+
+        respuesta = mover_recordatorio_relativamente_desde_mensaje(
+            mensaje
+        )
+
+        if (
+            actual
+            and respuesta.startswith("Listo.")
+        ):
+            guardar_contexto_edicion(
+                "recordatorio",
+                actual[0]
+            )
+
+        return respuesta
+
     if es_modificacion_recordatorio(
         mensaje
     ):
-
-        return modificar_recordatorio_desde_mensaje(
+        actual, _ = obtener_recordatorio_objetivo_para_edicion(
             mensaje
         )
+
+        respuesta = modificar_recordatorio_desde_mensaje(
+            mensaje
+        )
+
+        if (
+            actual
+            and respuesta.startswith("Listo.")
+        ):
+            guardar_contexto_edicion(
+                "recordatorio",
+                actual[0]
+            )
+
+        return respuesta
 
     if es_recordatorio_relativo_evento(
         mensaje
@@ -3271,6 +4155,27 @@ def procesar_comandos_directos(
 
     # EVENTOS
 
+    if es_desplazamiento_relativo_evento(
+        mensaje
+    ):
+
+        evento = buscar_evento_desde_mensaje(
+            mensaje
+        )
+
+        if evento:
+            respuesta = mover_evento_relativamente_desde_mensaje(
+                mensaje
+            )
+
+            if respuesta.startswith("Listo."):
+                guardar_contexto_edicion(
+                    "evento",
+                    evento[0]
+                )
+
+            return respuesta
+
     if es_modificacion_evento(
         mensaje
     ):
@@ -3280,10 +4185,17 @@ def procesar_comandos_directos(
         )
 
         if evento:
-
-            return modificar_evento_desde_mensaje(
+            respuesta = modificar_evento_desde_mensaje(
                 mensaje
             )
+
+            if respuesta.startswith("Listo."):
+                guardar_contexto_edicion(
+                    "evento",
+                    evento[0]
+                )
+
+            return respuesta
 
     if es_cancelacion_evento(
         mensaje
@@ -3584,6 +4496,30 @@ No escribas nada fuera del JSON.
         "ninguna",
     )
 
+    if (
+        accion == "crear_tarea"
+        and not autoriza_creacion_tarea_desde_modelo(
+            mensaje
+        )
+    ):
+
+        return (
+            "No veo una solicitud explícita para crear "
+            "una tarea, así que no guardé nada."
+        )
+
+    if (
+        accion == "crear_evento"
+        and not autoriza_creacion_evento_desde_modelo(
+            mensaje
+        )
+    ):
+
+        return (
+            "No veo una solicitud explícita para crear "
+            "un evento, así que no guardé nada."
+        )
+
     if accion == "crear_tarea":
 
         titulo = str(
@@ -3732,6 +4668,9 @@ print("🧩 Datos faltantes de eventos: activos")
 print("🔀 Resolución de ambigüedades: activa")
 print("🛡️ Seguridad conversacional: activa")
 print("🎛️ Gestión avanzada de avisos: activa")
+print("🔗 Referencias contextuales de edición: activas")
+print("⏱️ Edición natural de recordatorios: activa")
+print("↔️ Edición relativa de eventos: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()
