@@ -3,10 +3,14 @@ import subprocess
 import time
 from datetime import datetime
 
-DB_PATH = "hermes.db"
 
+DB_PATH = "hermes.db"
 INTERVALO_REVISION = 15
 
+
+# ==========================================================
+# BASE DE DATOS
+# ==========================================================
 
 def conectar():
     return sqlite3.connect(DB_PATH)
@@ -32,10 +36,11 @@ def crear_tabla_recordatorios():
     conexion.close()
 
 
-def buscar_recordatorio_pendiente(
-    titulo,
-    fecha_hora
-):
+# ==========================================================
+# CONSULTAS
+# ==========================================================
+
+def obtener_recordatorio_por_id(recordatorio_id):
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -43,16 +48,13 @@ def buscar_recordatorio_pendiente(
         SELECT
             id,
             titulo,
-            fecha_hora
+            mensaje,
+            fecha_hora,
+            estado
         FROM recordatorios
-        WHERE estado = 'pendiente'
-          AND lower(titulo) = lower(?)
-          AND fecha_hora = ?
+        WHERE id = ?
         LIMIT 1
-    """, (
-        titulo.strip(),
-        fecha_hora
-    ))
+    """, (recordatorio_id,))
 
     resultado = cursor.fetchone()
 
@@ -60,6 +62,83 @@ def buscar_recordatorio_pendiente(
 
     return resultado
 
+
+def obtener_recordatorios_pendientes():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            mensaje,
+            fecha_hora
+        FROM recordatorios
+        WHERE estado = 'pendiente'
+        ORDER BY fecha_hora ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def buscar_recordatorio_pendiente(
+    titulo,
+    fecha_hora,
+    excluir_id=None
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    if excluir_id is None:
+
+        cursor.execute("""
+            SELECT
+                id,
+                titulo,
+                fecha_hora
+            FROM recordatorios
+            WHERE estado = 'pendiente'
+              AND lower(titulo) = lower(?)
+              AND fecha_hora = ?
+            LIMIT 1
+        """, (
+            titulo.strip(),
+            fecha_hora
+        ))
+
+    else:
+
+        cursor.execute("""
+            SELECT
+                id,
+                titulo,
+                fecha_hora
+            FROM recordatorios
+            WHERE estado = 'pendiente'
+              AND lower(titulo) = lower(?)
+              AND fecha_hora = ?
+              AND id != ?
+            LIMIT 1
+        """, (
+            titulo.strip(),
+            fecha_hora,
+            excluir_id
+        ))
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
+# ==========================================================
+# CREAR
+# ==========================================================
 
 def crear_recordatorio(
     titulo,
@@ -105,27 +184,138 @@ def crear_recordatorio(
     )
 
 
-def obtener_recordatorios_pendientes():
+# ==========================================================
+# MODIFICAR
+# ==========================================================
+
+def modificar_recordatorio(
+    recordatorio_id,
+    nueva_fecha_hora,
+    nuevo_titulo=None,
+    nuevo_mensaje=None
+):
+    actual = obtener_recordatorio_por_id(
+        recordatorio_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[4] != "pendiente":
+        return (
+            "no_pendiente",
+            recordatorio_id
+        )
+
+    titulo_actual = actual[1]
+    mensaje_actual = actual[2] or ""
+
+    titulo_final = (
+        nuevo_titulo.strip()
+        if nuevo_titulo
+        else titulo_actual
+    )
+
+    mensaje_final = (
+        nuevo_mensaje.strip()
+        if nuevo_mensaje is not None
+        else mensaje_actual
+    )
+
+    duplicado = buscar_recordatorio_pendiente(
+        titulo_final,
+        nueva_fecha_hora,
+        excluir_id=recordatorio_id
+    )
+
+    if duplicado:
+        return (
+            "duplicado",
+            duplicado[0]
+        )
+
     conexion = conectar()
     cursor = conexion.cursor()
 
     cursor.execute("""
-        SELECT
-            id,
-            titulo,
-            mensaje,
-            fecha_hora
-        FROM recordatorios
-        WHERE estado = 'pendiente'
-        ORDER BY fecha_hora ASC
-    """)
+        UPDATE recordatorios
+        SET titulo = ?,
+            mensaje = ?,
+            fecha_hora = ?
+        WHERE id = ?
+          AND estado = 'pendiente'
+    """, (
+        titulo_final,
+        mensaje_final,
+        nueva_fecha_hora,
+        recordatorio_id
+    ))
 
-    resultados = cursor.fetchall()
-
+    conexion.commit()
     conexion.close()
 
-    return resultados
+    return (
+        "actualizado",
+        recordatorio_id
+    )
 
+
+# ==========================================================
+# CANCELAR
+# ==========================================================
+
+def cancelar_recordatorio(
+    recordatorio_id
+):
+    actual = obtener_recordatorio_por_id(
+        recordatorio_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[4] == "cancelado":
+        return (
+            "ya_cancelado",
+            recordatorio_id
+        )
+
+    if actual[4] == "disparado":
+        return (
+            "ya_disparado",
+            recordatorio_id
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE recordatorios
+        SET estado = 'cancelado'
+        WHERE id = ?
+          AND estado = 'pendiente'
+    """, (
+        recordatorio_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "cancelado",
+        recordatorio_id
+    )
+
+
+# ==========================================================
+# DISPARO
+# ==========================================================
 
 def marcar_como_disparado(
     recordatorio_id
@@ -145,6 +335,10 @@ def marcar_como_disparado(
     conexion.commit()
     conexion.close()
 
+
+# ==========================================================
+# NOTIFICACIONES macOS
+# ==========================================================
 
 def escapar_applescript(texto):
     return (
@@ -183,6 +377,10 @@ def enviar_notificacion(
     )
 
 
+# ==========================================================
+# MOTOR
+# ==========================================================
+
 def revisar_recordatorios():
     ahora = datetime.now()
 
@@ -206,6 +404,7 @@ def revisar_recordatorios():
             continue
 
         if momento <= ahora:
+
             texto = (
                 mensaje
                 if mensaje
@@ -224,7 +423,8 @@ def revisar_recordatorios():
             print(
                 f"🔔 Recordatorio "
                 f"#{recordatorio_id}: "
-                f"{titulo}"
+                f"{titulo}",
+                flush=True
             )
 
 
@@ -252,6 +452,7 @@ def ejecutar_motor():
     print()
 
     while True:
+
         try:
             revisar_recordatorios()
 
