@@ -1727,6 +1727,28 @@ def extraer_titulo_evento_natural(
     )
 
     titulo = re.sub(
+        r"\b(?:dura|durante|por)\s+media\s+hora\b",
+        "",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\b(?:dura|durante|por)\s+(?:una|un)\s+hora\b",
+        "",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\b(?:dura|durante|por)\s+\d+\s*"
+        r"(?:minuto|minutos|hora|horas)\b",
+        "",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
         r"\s+",
         " ",
         titulo,
@@ -1751,6 +1773,21 @@ def crear_evento_natural_desde_mensaje(
     hora_inicio, hora_fin = extraer_horas_del_mensaje(
         mensaje
     )
+
+    duracion_minutos = extraer_duracion_evento_minutos(
+        mensaje
+    )
+
+    if (
+        hora_inicio
+        and hora_fin is None
+        and duracion_minutos is not None
+    ):
+        hora_fin = calcular_hora_fin_por_duracion(
+            fecha,
+            hora_inicio,
+            duracion_minutos,
+        )
 
     titulo = extraer_titulo_evento_natural(
         mensaje
@@ -1788,11 +1825,99 @@ def crear_evento_natural_desde_mensaje(
         descripcion="",
     )
 
-    return (
+    respuesta = (
         f"Listo. Agregué el evento "
         f"#{evento_id}: {titulo} para "
         f"{fecha_para_mostrar(fecha)} "
-        f"a las {hora_inicio}."
+        f"a las {hora_inicio}"
+    )
+
+    if hora_fin:
+        respuesta += (
+            f" hasta las {hora_fin}"
+        )
+
+    respuesta += "."
+
+    return respuesta
+
+
+# ==========================================================
+# DURACIÓN DE EVENTOS — DURACIÓN NATURAL
+# ==========================================================
+
+def extraer_duracion_evento_minutos(
+    mensaje
+):
+    """
+    Interpreta duraciones naturales como:
+    - por 2 horas
+    - durante 90 minutos
+    - dura una hora
+    - dura media hora
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if re.search(
+        r"\b(?:dura|durante|por)\s+media\s+hora\b",
+        texto
+    ):
+        return 30
+
+    if re.search(
+        r"\b(?:dura|durante|por)\s+(?:una|un)\s+hora\b",
+        texto
+    ):
+        return 60
+
+    coincidencia = re.search(
+        r"\b(?:dura|durante|por)\s+"
+        r"(\d+)\s*"
+        r"(minuto|minutos|hora|horas)\b",
+        texto
+    )
+
+    if not coincidencia:
+        return None
+
+    cantidad = int(
+        coincidencia.group(1)
+    )
+
+    unidad = coincidencia.group(2)
+
+    if unidad.startswith(
+        "hora"
+    ):
+        return cantidad * 60
+
+    return cantidad
+
+
+def calcular_hora_fin_por_duracion(
+    fecha_iso,
+    hora_inicio,
+    duracion_minutos,
+):
+    if not fecha_iso or not hora_inicio or duracion_minutos is None:
+        return None
+
+    inicio = datetime.fromisoformat(
+        f"{fecha_iso}T{hora_inicio}:00"
+    )
+
+    fin = (
+        inicio
+        + timedelta(
+            minutes=duracion_minutos
+        )
+    )
+
+    return fin.strftime(
+        "%H:%M"
     )
 
 
@@ -3871,6 +3996,156 @@ def procesar_confirmacion_aviso(
 
 
 # ==========================================================
+# DURACIÓN DE EVENTOS — CAMBIAR DURACIÓN
+# ==========================================================
+
+def es_cambio_duracion_evento(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if "duracion" not in texto:
+        return False
+
+    accion = any(
+        palabra in texto
+        for palabra in (
+            "cambia",
+            "cambiar",
+            "modifica",
+            "modificar",
+            "pone",
+            "poner",
+            "deja",
+            "dejar",
+        )
+    )
+
+    return accion
+
+
+def extraer_nueva_duracion_evento_minutos(
+    mensaje
+):
+    """
+    Interpreta la duración objetivo en frases como:
+    "Cambiá la duración de la reunión a 3 horas"
+    "Poné la duración de la llamada en 45 minutos"
+    """
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if re.search(
+        r"\b(?:a|en)\s+media\s+hora\b",
+        texto
+    ):
+        return 30
+
+    if re.search(
+        r"\b(?:a|en)\s+(?:una|un)\s+hora\b",
+        texto
+    ):
+        return 60
+
+    coincidencia = re.search(
+        r"\b(?:a|en)\s+"
+        r"(\d+)\s*"
+        r"(minuto|minutos|hora|horas)\b",
+        texto
+    )
+
+    if not coincidencia:
+        return None
+
+    cantidad = int(
+        coincidencia.group(1)
+    )
+
+    unidad = coincidencia.group(2)
+
+    if unidad.startswith(
+        "hora"
+    ):
+        return cantidad * 60
+
+    return cantidad
+
+
+def cambiar_duracion_evento_desde_mensaje(
+    mensaje
+):
+    evento = buscar_evento_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+        return (
+            "No pude identificar de qué evento "
+            "querés cambiar la duración."
+        )
+
+    if not evento[3] or not evento[4]:
+        return (
+            f"El evento {evento[1]} no tiene fecha "
+            f"u hora de inicio suficiente."
+        )
+
+    duracion_minutos = extraer_nueva_duracion_evento_minutos(
+        mensaje
+    )
+
+    if duracion_minutos is None:
+        return (
+            "Necesito saber la nueva duración. "
+            "Por ejemplo: 'Cambiá la duración "
+            "de la reunión a 90 minutos'."
+        )
+
+    inicio = datetime.fromisoformat(
+        f"{evento[3]}T{evento[4]}:00"
+    )
+
+    fin = (
+        inicio
+        + timedelta(
+            minutes=duracion_minutos
+        )
+    )
+
+    hora_fin_nueva = fin.strftime(
+        "%H:%M"
+    )
+
+    estado_modificacion, _ = modificar_evento(
+        evento_id=evento[0],
+        fecha=evento[3],
+        hora_inicio=evento[4],
+        hora_fin=hora_fin_nueva,
+    )
+
+    if estado_modificacion == "no_existe":
+        return (
+            f"No encontré el evento #{evento[0]}."
+        )
+
+    if estado_modificacion == "no_activo":
+        return (
+            f"El evento #{evento[0]} ya no está activo."
+        )
+
+    return (
+        f"Listo. Cambié la duración de "
+        f"#{evento[0]}: {evento[1]} a "
+        f"{descripcion_anticipacion(duracion_minutos)}. "
+        f"Ahora va de {evento[4]} a {hora_fin_nueva}."
+    )
+
+
+# ==========================================================
 # MODIFICAR EVENTOS
 # ==========================================================
 
@@ -4265,6 +4540,45 @@ def aplicar_modificacion_evento(
         if hora_fin_nueva
         else hora_fin_actual
     )
+
+    # Si cambia la hora de inicio y no se indicó una nueva hora de fin,
+    # conservamos la duración original del evento.
+    if (
+        hora_nueva
+        and hora_fin_nueva is None
+        and hora_actual
+        and hora_fin_actual
+    ):
+        inicio_actual = datetime.fromisoformat(
+            f"{fecha_actual}T{hora_actual}:00"
+        )
+
+        fin_actual = datetime.fromisoformat(
+            f"{fecha_actual}T{hora_fin_actual}:00"
+        )
+
+        if fin_actual < inicio_actual:
+            fin_actual += timedelta(
+                days=1
+            )
+
+        duracion_original = (
+            fin_actual
+            - inicio_actual
+        )
+
+        nuevo_inicio = datetime.fromisoformat(
+            f"{fecha_final}T{hora_final}:00"
+        )
+
+        nuevo_fin = (
+            nuevo_inicio
+            + duracion_original
+        )
+
+        hora_fin_final = nuevo_fin.strftime(
+            "%H:%M"
+        )
 
     if hora_final:
 
@@ -5196,6 +5510,18 @@ def procesar_comandos_directos(
 
         confirmacion_pendiente = None
 
+    if (
+        confirmacion_pendiente is not None
+        and es_cambio_duracion_evento(
+            mensaje
+        )
+    ):
+        confirmacion_pendiente = None
+
+        return cambiar_duracion_evento_desde_mensaje(
+            mensaje
+        )
+
     if confirmacion_pendiente is not None:
 
         return procesar_confirmacion_pendiente(
@@ -5337,6 +5663,29 @@ def procesar_comandos_directos(
         )
 
     # EVENTOS
+
+    if es_cambio_duracion_evento(
+        mensaje
+    ):
+
+        evento = buscar_evento_desde_mensaje(
+            mensaje
+        )
+
+        respuesta = cambiar_duracion_evento_desde_mensaje(
+            mensaje
+        )
+
+        if (
+            evento
+            and respuesta.startswith("Listo.")
+        ):
+            guardar_contexto_edicion(
+                "evento",
+                evento[0]
+            )
+
+        return respuesta
 
     if es_creacion_evento_natural(
         mensaje
@@ -5869,6 +6218,9 @@ print("📅 Creación natural de eventos temporales: activa")
 print("🗓️ Fechas naturales avanzadas: activas")
 print("🌅 Partes del día: activas")
 print("📆 Períodos naturales: activos")
+print("⏳ Duración natural de eventos: activa")
+print("🕐 Edición de duración de eventos: activa")
+print("🧭 Conservación automática de duración al mover eventos: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()
