@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+hermes.db
+.DS_Store
+.env
