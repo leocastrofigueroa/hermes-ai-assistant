@@ -354,6 +354,73 @@ def completar_tarea(
     return actualizado
 
 
+def modificar_tarea(
+    tarea_id,
+    fecha=None,
+    titulo=None,
+    descripcion=None
+):
+    actual = obtener_tarea_por_id(
+        tarea_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[4] != "pendiente":
+        return (
+            "no_pendiente",
+            tarea_id
+        )
+
+    titulo_final = (
+        titulo.strip()
+        if titulo is not None
+        else actual[1]
+    )
+
+    descripcion_final = (
+        descripcion.strip()
+        if descripcion is not None
+        else (actual[2] or "")
+    )
+
+    fecha_final = (
+        fecha
+        if fecha is not None
+        else actual[3]
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE tareas
+        SET titulo = ?,
+            descripcion = ?,
+            fecha = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'pendiente'
+    """, (
+        titulo_final,
+        descripcion_final,
+        fecha_final,
+        tarea_id
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizado",
+        tarea_id
+    )
+
+
 # ==========================================================
 # EVENTOS
 # ==========================================================

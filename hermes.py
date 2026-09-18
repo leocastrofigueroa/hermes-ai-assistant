@@ -15,6 +15,7 @@ from memoria import (
     obtener_tareas_entre_fechas,
     completar_tarea,
     obtener_tarea_por_id,
+    modificar_tarea,
     crear_evento,
     obtener_eventos_activos,
     obtener_eventos_por_fecha,
@@ -31,6 +32,7 @@ from recordatorios import (
     obtener_recordatorio_por_id,
     obtener_recordatorios_de_evento,
     obtener_recordatorios_de_tarea,
+    reprogramar_recordatorios_de_tarea,
     modificar_recordatorio,
     actualizar_recordatorio_vinculado,
     cancelar_recordatorio,
@@ -2466,6 +2468,339 @@ def dejar_solo_aviso_desde_mensaje(
         f"{'aviso' if cancelados == 1 else 'avisos'} adicional"
         f"{'' if cancelados == 1 else 'es'}."
     )
+
+
+# ==========================================================
+# CAMBIO DE HORARIO DE AVISO DE TAREAS
+# ==========================================================
+
+def es_cambio_horario_aviso_tarea(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_tarea = (
+        "tarea" in texto
+    )
+
+    menciona_aviso = any(
+        palabra in texto
+        for palabra in (
+            "aviso",
+            "recordatorio",
+            "recordame",
+            "recuerdo",
+        )
+    )
+
+    accion = any(
+        palabra in texto
+        for palabra in (
+            "cambia",
+            "cambiar",
+            "pasa",
+            "pasar",
+            "move",
+            "mover",
+            "reprograma",
+            "reprogramar",
+            "corre",
+            "correr",
+        )
+    )
+
+    menciona_hora = bool(
+        re.search(
+            r"\b(?:a\s+las?|para\s+las?)\s+"
+            r"\d{1,2}(?::\d{2})?\b",
+            texto
+        )
+    )
+
+    return (
+        menciona_tarea
+        and menciona_aviso
+        and accion
+        and menciona_hora
+    )
+
+
+def cambiar_horario_aviso_tarea_desde_mensaje(
+    mensaje
+):
+    tarea = obtener_tarea_objetivo_para_edicion(
+        mensaje
+    )
+
+    if not tarea:
+
+        return (
+            "No pude identificar a qué tarea "
+            "pertenece el aviso que querés cambiar."
+        )
+
+    recordatorios = obtener_recordatorios_de_tarea(
+        tarea[0]
+    )
+
+    if not recordatorios:
+
+        return (
+            f"La tarea #{tarea[0]}: {tarea[1]} "
+            f"no tiene recordatorios vinculados pendientes."
+        )
+
+    hora_nueva, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not hora_nueva:
+
+        return (
+            "No pude identificar la nueva hora "
+            "del aviso."
+        )
+
+    if len(recordatorios) > 1:
+
+        return (
+            f"La tarea #{tarea[0]}: {tarea[1]} tiene "
+            f"{len(recordatorios)} recordatorios vinculados. "
+            f"Indicame el número del recordatorio que querés cambiar."
+        )
+
+    recordatorio = recordatorios[0]
+
+    try:
+        momento_actual = datetime.fromisoformat(
+            recordatorio[3]
+        )
+
+    except ValueError:
+
+        return (
+            "El recordatorio vinculado tiene una fecha "
+            "inválida y no pude modificarlo."
+        )
+
+    nuevo_momento = momento_actual.replace(
+        hour=int(
+            hora_nueva.split(":")[0]
+        ),
+        minute=int(
+            hora_nueva.split(":")[1]
+        ),
+        second=0,
+        microsecond=0,
+    )
+
+    if nuevo_momento <= datetime.now():
+
+        return (
+            "Ese nuevo horario ya pasó. "
+            "Elegí una hora futura."
+        )
+
+    estado, recordatorio_id = modificar_recordatorio(
+        recordatorio[0],
+        nuevo_momento.isoformat()
+    )
+
+    if estado == "duplicado":
+
+        return (
+            f"Ya existe otro recordatorio pendiente "
+            f"con ese horario como #{recordatorio_id}."
+        )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude actualizar ese recordatorio."
+        )
+
+    return (
+        f"Listo. Cambié el aviso de la tarea "
+        f"#{tarea[0]}: {tarea[1]} "
+        f"de {momento_actual.strftime('%H:%M')} "
+        f"a {hora_nueva}. "
+        f"El día sigue siendo "
+        f"{fecha_para_mostrar(nuevo_momento.date().isoformat())}."
+    )
+
+
+# ==========================================================
+# EDICIÓN DE FECHA DE TAREAS
+# ==========================================================
+
+def es_modificacion_fecha_tarea(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_tarea = (
+        "tarea" in texto
+    )
+
+    accion = any(
+        palabra in texto
+        for palabra in (
+            "move",
+            "mover",
+            "pasa",
+            "pasar",
+            "cambia",
+            "cambiar",
+            "reprograma",
+            "reprogramar",
+            "corre",
+            "correr",
+        )
+    )
+
+    return (
+        menciona_tarea
+        and accion
+    )
+
+
+def obtener_tarea_objetivo_para_edicion(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    coincidencia = re.search(
+        r"(?:tarea\s*)?#?\s*(\d+)",
+        texto
+    )
+
+    if coincidencia:
+
+        tarea_id = int(
+            coincidencia.group(1)
+        )
+
+        tarea = obtener_tarea_por_id(
+            tarea_id
+        )
+
+        if (
+            tarea
+            and tarea[4] == "pendiente"
+        ):
+            return tarea
+
+    return buscar_tarea_desde_mensaje(
+        mensaje
+    )
+
+
+def modificar_fecha_tarea_desde_mensaje(
+    mensaje
+):
+    tarea = obtener_tarea_objetivo_para_edicion(
+        mensaje
+    )
+
+    if not tarea:
+
+        return (
+            "No pude identificar qué tarea "
+            "querés mover."
+        )
+
+    fecha_nueva = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    if not fecha_nueva:
+
+        return (
+            f"¿A qué día querés mover la tarea "
+            f"#{tarea[0]}: {tarea[1]}?"
+        )
+
+    fecha_anterior = tarea[3]
+
+    if not fecha_anterior:
+
+        estado, _ = modificar_tarea(
+            tarea[0],
+            fecha=fecha_nueva
+        )
+
+        if estado != "actualizado":
+
+            return (
+                "No pude actualizar esa tarea."
+            )
+
+        return (
+            f"Listo. Moví la tarea "
+            f"#{tarea[0]}: {tarea[1]} "
+            f"al {fecha_para_mostrar(fecha_nueva)}."
+        )
+
+    estado, _ = modificar_tarea(
+        tarea[0],
+        fecha=fecha_nueva
+    )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude actualizar esa tarea."
+        )
+
+    actualizados, cancelados = reprogramar_recordatorios_de_tarea(
+        tarea[0],
+        fecha_anterior,
+        fecha_nueva
+    )
+
+    respuesta = (
+        f"Listo. Moví la tarea "
+        f"#{tarea[0]}: {tarea[1]} "
+        f"al {fecha_para_mostrar(fecha_nueva)}."
+    )
+
+    if actualizados == 1:
+
+        respuesta += (
+            " También reprogramé 1 recordatorio "
+            "vinculado."
+        )
+
+    elif actualizados > 1:
+
+        respuesta += (
+            f" También reprogramé "
+            f"{actualizados} recordatorios "
+            f"vinculados."
+        )
+
+    if cancelados == 1:
+
+        respuesta += (
+            " Cancelé 1 recordatorio vinculado "
+            "porque su nuevo horario ya había pasado."
+        )
+
+    elif cancelados > 1:
+
+        respuesta += (
+            f" Cancelé {cancelados} recordatorios "
+            f"vinculados porque sus nuevos horarios "
+            f"ya habían pasado."
+        )
+
+    return respuesta
 
 
 # ==========================================================
@@ -5340,6 +5675,258 @@ def agenda_semana():
 
 
 # ==========================================================
+# AUDITORÍA Y LIMPIEZA TAREA ↔ RECORDATORIOS
+# ==========================================================
+
+def es_auditoria_sincronizacion_tareas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    habla_de_tareas = (
+        "tarea" in texto
+        or "tareas" in texto
+    )
+
+    menciona_revision = any(
+        expresion in texto
+        for expresion in (
+            "revisa",
+            "revisar",
+            "verifica",
+            "verificar",
+            "audita",
+            "auditar",
+            "controla",
+            "controlar",
+            "comproba",
+            "comprobar",
+            "sincronizacion",
+            "sincronizados",
+            "sincronizado",
+        )
+    )
+
+    return (
+        habla_de_tareas
+        and menciona_revision
+    )
+
+
+def revisar_y_limpiar_sincronizacion_tareas():
+    """
+    Revisa todos los recordatorios pendientes vinculados a tareas.
+
+    Limpia de forma segura:
+    - recordatorios vinculados a tareas inexistentes;
+    - recordatorios vinculados a tareas ya completadas;
+    - recordatorios vinculados con fecha/hora inválida.
+
+    No toca recordatorios independientes ni recordatorios de eventos.
+    """
+
+    pendientes = obtener_recordatorios_pendientes()
+
+    vinculados = []
+    cancelados = []
+    problemas_no_modificados = []
+
+    for pendiente in pendientes:
+
+        recordatorio_id = pendiente[0]
+
+        recordatorio = obtener_recordatorio_por_id(
+            recordatorio_id
+        )
+
+        if not recordatorio:
+            continue
+
+        tarea_id = (
+            recordatorio[7]
+            if len(recordatorio) > 7
+            else None
+        )
+
+        if tarea_id is None:
+            continue
+
+        vinculados.append(
+            recordatorio
+        )
+
+        tarea = obtener_tarea_por_id(
+            tarea_id
+        )
+
+        if not tarea:
+
+            estado, _ = cancelar_recordatorio(
+                recordatorio_id
+            )
+
+            if estado == "cancelado":
+                cancelados.append(
+                    (
+                        recordatorio_id,
+                        (
+                            f"estaba vinculado a la tarea "
+                            f"#{tarea_id}, pero esa tarea no existe"
+                        ),
+                    )
+                )
+
+            continue
+
+        if tarea[4] != "pendiente":
+
+            estado, _ = cancelar_recordatorio(
+                recordatorio_id
+            )
+
+            if estado == "cancelado":
+                cancelados.append(
+                    (
+                        recordatorio_id,
+                        (
+                            f"estaba vinculado a la tarea "
+                            f"#{tarea_id}: {tarea[1]}, "
+                            f"que ya está {tarea[4]}"
+                        ),
+                    )
+                )
+
+            continue
+
+        try:
+            momento = datetime.fromisoformat(
+                recordatorio[3]
+            )
+
+        except (TypeError, ValueError):
+
+            estado, _ = cancelar_recordatorio(
+                recordatorio_id
+            )
+
+            if estado == "cancelado":
+                cancelados.append(
+                    (
+                        recordatorio_id,
+                        (
+                            f"tenía una fecha/hora inválida "
+                            f"para la tarea #{tarea_id}: {tarea[1]}"
+                        ),
+                    )
+                )
+
+            continue
+
+        if tarea[3]:
+
+            try:
+                fecha_tarea = datetime.fromisoformat(
+                    tarea[3]
+                ).date()
+
+            except ValueError:
+                problemas_no_modificados.append(
+                    (
+                        recordatorio_id,
+                        (
+                            f"la tarea #{tarea_id}: {tarea[1]} "
+                            f"tiene una fecha inválida"
+                        ),
+                    )
+                )
+
+                continue
+
+            # Un aviso puede ser anterior al vencimiento de la tarea,
+            # por eso no exigimos que ambas fechas sean iguales.
+            if momento.date() > fecha_tarea:
+
+                problemas_no_modificados.append(
+                    (
+                        recordatorio_id,
+                        (
+                            f"está programado para después de la fecha "
+                            f"de la tarea #{tarea_id}: {tarea[1]}"
+                        ),
+                    )
+                )
+
+    if not vinculados:
+
+        return (
+            "No hay recordatorios pendientes vinculados a tareas "
+            "para revisar."
+        )
+
+    if (
+        not cancelados
+        and not problemas_no_modificados
+    ):
+
+        cantidad = len(
+            vinculados
+        )
+
+        return (
+            f"Sincronización de tareas correcta. Revisé "
+            f"{cantidad} "
+            f"{'recordatorio vinculado' if cantidad == 1 else 'recordatorios vinculados'} "
+            f"y no encontré vínculos huérfanos ni inconsistencias."
+        )
+
+    lineas = []
+
+    if cancelados:
+
+        lineas.append(
+            (
+                f"Limpié {len(cancelados)} "
+                f"{'recordatorio inválido' if len(cancelados) == 1 else 'recordatorios inválidos'}:"
+            )
+        )
+
+        for recordatorio_id, detalle in cancelados:
+
+            lineas.append(
+                f"- Recordatorio #{recordatorio_id}: {detalle}."
+            )
+
+    if problemas_no_modificados:
+
+        if lineas:
+            lineas.append("")
+
+        lineas.append(
+            (
+                f"También encontré {len(problemas_no_modificados)} "
+                f"{'situación para revisar' if len(problemas_no_modificados) == 1 else 'situaciones para revisar'}:"
+            )
+        )
+
+        for recordatorio_id, detalle in problemas_no_modificados:
+
+            lineas.append(
+                f"- Recordatorio #{recordatorio_id}: {detalle}."
+            )
+
+        lineas.append("")
+        lineas.append(
+            "No modifiqué esas situaciones porque podrían ser intencionales."
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+# ==========================================================
 # AUDITORÍA DE SINCRONIZACIÓN EVENTO ↔ RECORDATORIOS
 # ==========================================================
 
@@ -5679,6 +6266,18 @@ def procesar_comandos_directos(
             mensaje
         )
 
+    if (
+        confirmacion_pendiente is not None
+        and es_cambio_horario_aviso_tarea(
+            mensaje
+        )
+    ):
+        confirmacion_pendiente = None
+
+        return cambiar_horario_aviso_tarea_desde_mensaje(
+            mensaje
+        )
+
     if confirmacion_pendiente is not None:
 
         return procesar_confirmacion_pendiente(
@@ -5692,6 +6291,12 @@ def procesar_comandos_directos(
         return respuesta_contexto_faltante(
             mensaje
         )
+
+    if es_auditoria_sincronizacion_tareas(
+        mensaje
+    ):
+
+        return revisar_y_limpiar_sincronizacion_tareas()
 
     if es_auditoria_sincronizacion(
         mensaje
@@ -5742,6 +6347,26 @@ def procesar_comandos_directos(
             return mostrar_avisos_de_evento(
                 mensaje
             )
+
+    # CAMBIAR HORARIO DE AVISO DE TAREA
+
+    if es_cambio_horario_aviso_tarea(
+        mensaje
+    ):
+
+        return cambiar_horario_aviso_tarea_desde_mensaje(
+            mensaje
+        )
+
+    # MODIFICAR FECHA DE TAREAS
+
+    if es_modificacion_fecha_tarea(
+        mensaje
+    ):
+
+        return modificar_fecha_tarea_desde_mensaje(
+            mensaje
+        )
 
     # RECORDATORIOS VINCULADOS A TAREAS
 
@@ -6433,6 +7058,10 @@ print("⏳ Duración natural de eventos: activa")
 print("🕐 Edición de duración de eventos: activa")
 print("🧭 Conservación automática de duración al mover eventos: activa")
 print("✅ Recordatorios vinculados a tareas: activos")
+print("📅 Sincronización fecha de tarea ↔ recordatorios: activa")
+print("⏰ Edición de horario de avisos de tareas: activa")
+print("🛡️ Prioridad de edición de avisos de tareas: activa")
+print("🔎 Auditoría y limpieza tarea ↔ recordatorios: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()

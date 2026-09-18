@@ -531,6 +531,103 @@ def cancelar_recordatorios_de_evento(
 # VÍNCULO CON TAREAS
 # ==========================================================
 
+def reprogramar_recordatorios_de_tarea(
+    tarea_id,
+    fecha_anterior,
+    fecha_nueva
+):
+    if not fecha_anterior or not fecha_nueva:
+        return (
+            0,
+            0
+        )
+
+    try:
+        fecha_origen = datetime.fromisoformat(
+            fecha_anterior
+        ).date()
+
+        fecha_destino = datetime.fromisoformat(
+            fecha_nueva
+        ).date()
+
+    except ValueError:
+        return (
+            0,
+            0
+        )
+
+    diferencia = (
+        fecha_destino
+        - fecha_origen
+    )
+
+    recordatorios = obtener_recordatorios_de_tarea(
+        tarea_id
+    )
+
+    actualizados = 0
+    cancelados = 0
+    ahora = datetime.now()
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    for recordatorio in recordatorios:
+
+        recordatorio_id = recordatorio[0]
+
+        try:
+            momento_actual = datetime.fromisoformat(
+                recordatorio[3]
+            )
+
+        except ValueError:
+            continue
+
+        nuevo_momento = (
+            momento_actual
+            + diferencia
+        )
+
+        if nuevo_momento <= ahora:
+
+            cursor.execute("""
+                UPDATE recordatorios
+                SET estado = 'cancelado'
+                WHERE id = ?
+                  AND estado = 'pendiente'
+            """, (
+                recordatorio_id,
+            ))
+
+            cancelados += 1
+
+        else:
+
+            cursor.execute("""
+                UPDATE recordatorios
+                SET fecha_hora = ?
+                WHERE id = ?
+                  AND estado = 'pendiente'
+            """, (
+                nuevo_momento
+                .replace(microsecond=0)
+                .isoformat(),
+                recordatorio_id
+            ))
+
+            actualizados += 1
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        actualizados,
+        cancelados
+    )
+
+
 def cancelar_recordatorios_de_tarea(
     tarea_id
 ):
