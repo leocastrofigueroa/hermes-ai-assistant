@@ -2471,6 +2471,334 @@ def dejar_solo_aviso_desde_mensaje(
 
 
 # ==========================================================
+# CAMBIO COMBINADO DE PRIORIDAD + FECHA DE TAREA
+# ==========================================================
+
+def es_cambio_combinado_tarea(
+    mensaje
+):
+    prioridad = extraer_prioridad_tarea(
+        mensaje
+    )
+
+    fecha_nueva = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    if not prioridad or not fecha_nueva:
+        return False
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_tarea = (
+        "tarea" in texto
+        or bool(
+            re.search(
+                r"\btarea\s*#?\s*\d+\b",
+                texto
+            )
+        )
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "pone prioridad",
+            "pon prioridad",
+            "cambia la prioridad",
+            "cambiar la prioridad",
+            "marca como urgente",
+            "marcar como urgente",
+            "es urgente",
+            "pasa",
+            "pasala",
+            "pasalo",
+            "pasar",
+            "move",
+            "mover",
+            "reprograma",
+            "reprogramar",
+            "corre",
+            "correr",
+        )
+    )
+
+    return (
+        prioridad is not None
+        and fecha_nueva is not None
+        and (
+            menciona_tarea
+            or accion
+        )
+    )
+
+
+def cambiar_prioridad_y_fecha_tarea_desde_mensaje(
+    mensaje
+):
+    prioridad = extraer_prioridad_tarea(
+        mensaje
+    )
+
+    fecha_nueva = extraer_fecha_del_mensaje(
+        mensaje
+    )
+
+    if not prioridad:
+
+        return (
+            "No pude identificar la prioridad. "
+            "Podés usar alta, media o baja."
+        )
+
+    if not fecha_nueva:
+
+        return (
+            "No pude identificar la nueva fecha "
+            "de la tarea."
+        )
+
+    tarea = obtener_tarea_objetivo_para_edicion(
+        mensaje
+    )
+
+    if not tarea:
+
+        return (
+            "No pude identificar qué tarea "
+            "querés modificar."
+        )
+
+    fecha_anterior = tarea[3]
+
+    estado, _ = modificar_tarea(
+        tarea[0],
+        fecha=fecha_nueva,
+        prioridad=prioridad
+    )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude actualizar esa tarea."
+        )
+
+    actualizados = 0
+    cancelados = 0
+
+    if (
+        fecha_anterior
+        and fecha_anterior != fecha_nueva
+    ):
+
+        (
+            actualizados,
+            cancelados
+        ) = reprogramar_recordatorios_de_tarea(
+            tarea[0],
+            fecha_anterior,
+            fecha_nueva
+        )
+
+    respuesta = (
+        f"Listo. La tarea #{tarea[0]}: "
+        f"{tarea[1]} quedó con prioridad "
+        f"{prioridad} y fecha "
+        f"{fecha_para_mostrar(fecha_nueva)}."
+    )
+
+    if actualizados == 1:
+
+        respuesta += (
+            " También reprogramé 1 recordatorio "
+            "vinculado."
+        )
+
+    elif actualizados > 1:
+
+        respuesta += (
+            f" También reprogramé "
+            f"{actualizados} recordatorios "
+            f"vinculados."
+        )
+
+    if cancelados == 1:
+
+        respuesta += (
+            " Cancelé 1 recordatorio vinculado "
+            "porque su nuevo horario ya había pasado."
+        )
+
+    elif cancelados > 1:
+
+        respuesta += (
+            f" Cancelé {cancelados} recordatorios "
+            f"vinculados porque sus nuevos horarios "
+            f"ya habían pasado."
+        )
+
+    return respuesta
+
+
+# ==========================================================
+# PRIORIDADES DE TAREAS
+# ==========================================================
+
+def extraer_prioridad_tarea(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if any(
+        expresion in texto
+        for expresion in (
+            "urgente",
+            "prioridad alta",
+            "prioridad maxima",
+            "muy importante",
+        )
+    ):
+        return "alta"
+
+    if any(
+        expresion in texto
+        for expresion in (
+            "prioridad baja",
+            "poca prioridad",
+            "no es urgente",
+            "cuando pueda",
+        )
+    ):
+        return "baja"
+
+    if any(
+        expresion in texto
+        for expresion in (
+            "prioridad media",
+            "prioridad normal",
+            "prioridad intermedia",
+        )
+    ):
+        return "media"
+
+    return None
+
+
+def etiqueta_prioridad(
+    prioridad
+):
+    valor = (
+        prioridad
+        or "media"
+    ).lower()
+
+    if valor == "alta":
+        return "ALTA"
+
+    if valor == "baja":
+        return "BAJA"
+
+    return "MEDIA"
+
+
+def es_cambio_prioridad_tarea(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    prioridad = extraer_prioridad_tarea(
+        mensaje
+    )
+
+    if not prioridad:
+        return False
+
+    menciona_tarea = (
+        "tarea" in texto
+        or bool(
+            re.search(
+                r"\btarea\s*#?\s*\d+\b",
+                texto
+            )
+        )
+    )
+
+    accion_explicita = any(
+        expresion in texto
+        for expresion in (
+            "pone prioridad",
+            "pon prioridad",
+            "cambia la prioridad",
+            "cambiar la prioridad",
+            "marca como urgente",
+            "marcar como urgente",
+            "es urgente",
+            "prioridad alta",
+            "prioridad media",
+            "prioridad normal",
+            "prioridad baja",
+        )
+    )
+
+    return (
+        prioridad is not None
+        and (
+            menciona_tarea
+            or accion_explicita
+        )
+    )
+
+
+def cambiar_prioridad_tarea_desde_mensaje(
+    mensaje
+):
+    prioridad = extraer_prioridad_tarea(
+        mensaje
+    )
+
+    if not prioridad:
+        return (
+            "No pude identificar la prioridad. "
+            "Podés usar alta, media o baja."
+        )
+
+    tarea = obtener_tarea_objetivo_para_edicion(
+        mensaje
+    )
+
+    if not tarea:
+
+        return (
+            "No pude identificar qué tarea "
+            "querés priorizar."
+        )
+
+    estado, _ = modificar_tarea(
+        tarea[0],
+        prioridad=prioridad
+    )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude cambiar la prioridad "
+            "de esa tarea."
+        )
+
+    return (
+        f"Listo. La tarea #{tarea[0]}: "
+        f"{tarea[1]} quedó con prioridad "
+        f"{prioridad}."
+    )
+
+
+# ==========================================================
 # CAMBIO DE HORARIO DE AVISO DE TAREAS
 # ==========================================================
 
@@ -5408,7 +5736,8 @@ def obtener_texto_tareas():
     return "\n".join(
         f"- ID {tarea[0]}: "
         f"{tarea[1]} | "
-        f"{tarea[3] or 'sin fecha'}"
+        f"{tarea[3] or 'sin fecha'} | "
+        f"prioridad {tarea[5] if len(tarea) > 5 else 'media'}"
         for tarea in tareas
     )
 
@@ -5440,12 +5769,359 @@ def mostrar_tareas_pendientes():
                 f"{fecha_para_mostrar(tarea[3])}"
             )
 
+        prioridad = (
+            tarea[5]
+            if len(tarea) > 5 and tarea[5]
+            else "media"
+        )
+
+        texto += (
+            f" — prioridad "
+            f"{prioridad}"
+        )
+
+        vencimiento = etiqueta_vencimiento_tarea(
+            tarea[3]
+        )
+
+        if vencimiento:
+
+            texto += (
+                f" — {vencimiento}"
+            )
+
         lineas.append(
             texto
         )
 
     return "\n".join(
         lineas
+    )
+
+
+# ==========================================================
+# ORDEN DE TAREAS POR URGENCIA REAL
+# ==========================================================
+
+def puntaje_urgencia_tarea(
+    tarea
+):
+    """
+    Menor puntaje = más urgente.
+
+    Criterios:
+    1. Tareas atrasadas primero.
+    2. Después tareas que vencen antes.
+    3. A igual fecha, prioridad alta > media > baja.
+    4. Tareas sin fecha quedan al final.
+    """
+    fecha_tarea = tarea[3]
+
+    prioridad = (
+        tarea[5]
+        if len(tarea) > 5 and tarea[5]
+        else "media"
+    )
+
+    prioridad_orden = {
+        "alta": 0,
+        "media": 1,
+        "baja": 2,
+    }.get(
+        prioridad,
+        1
+    )
+
+    if not fecha_tarea:
+        return (
+            3,
+            date.max,
+            prioridad_orden,
+            tarea[0],
+        )
+
+    try:
+        fecha_objetivo = date.fromisoformat(
+            fecha_tarea
+        )
+
+    except ValueError:
+        return (
+            3,
+            date.max,
+            prioridad_orden,
+            tarea[0],
+        )
+
+    hoy = date.today()
+
+    if fecha_objetivo < hoy:
+        categoria = 0
+    elif fecha_objetivo == hoy:
+        categoria = 1
+    else:
+        categoria = 2
+
+    return (
+        categoria,
+        fecha_objetivo,
+        prioridad_orden,
+        tarea[0],
+    )
+
+
+def obtener_tareas_por_urgencia():
+    tareas = obtener_tareas_pendientes()
+
+    return sorted(
+        tareas,
+        key=puntaje_urgencia_tarea
+    )
+
+
+def mostrar_tareas_por_urgencia():
+    tareas = obtener_tareas_por_urgencia()
+
+    if not tareas:
+        return (
+            "No tenés tareas pendientes."
+        )
+
+    lineas = [
+        "Tus tareas ordenadas por urgencia son:"
+    ]
+
+    for tarea in tareas:
+
+        prioridad = (
+            tarea[5]
+            if len(tarea) > 5 and tarea[5]
+            else "media"
+        )
+
+        texto = (
+            f"{tarea[0]}. "
+            f"{tarea[1]}"
+        )
+
+        if tarea[3]:
+            texto += (
+                f" — "
+                f"{fecha_para_mostrar(tarea[3])}"
+            )
+        else:
+            texto += (
+                " — sin fecha"
+            )
+
+        texto += (
+            f" — prioridad {prioridad}"
+        )
+
+        vencimiento = etiqueta_vencimiento_tarea(
+            tarea[3]
+        )
+
+        if vencimiento:
+            texto += (
+                f" — {vencimiento}"
+            )
+
+        lineas.append(
+            texto
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+# ==========================================================
+# VENCIMIENTOS Y TAREAS ATRASADAS
+# ==========================================================
+
+def dias_de_atraso_tarea(
+    fecha_tarea
+):
+    if not fecha_tarea:
+        return None
+
+    try:
+        fecha_objetivo = date.fromisoformat(
+            fecha_tarea
+        )
+
+    except ValueError:
+        return None
+
+    hoy = date.today()
+
+    if fecha_objetivo >= hoy:
+        return 0
+
+    return (
+        hoy
+        - fecha_objetivo
+    ).days
+
+
+def etiqueta_vencimiento_tarea(
+    fecha_tarea
+):
+    if not fecha_tarea:
+        return None
+
+    try:
+        fecha_objetivo = date.fromisoformat(
+            fecha_tarea
+        )
+
+    except ValueError:
+        return None
+
+    hoy = date.today()
+
+    if fecha_objetivo < hoy:
+
+        dias = (
+            hoy
+            - fecha_objetivo
+        ).days
+
+        if dias == 1:
+            return "ATRASADA 1 día"
+
+        return (
+            f"ATRASADA {dias} días"
+        )
+
+    if fecha_objetivo == hoy:
+        return "vence hoy"
+
+    if fecha_objetivo == (
+        hoy
+        + timedelta(days=1)
+    ):
+        return "vence mañana"
+
+    return None
+
+
+def mostrar_tareas_atrasadas():
+    tareas = obtener_tareas_pendientes()
+
+    atrasadas = []
+
+    hoy = date.today()
+
+    for tarea in tareas:
+
+        if not tarea[3]:
+            continue
+
+        try:
+            fecha_tarea = date.fromisoformat(
+                tarea[3]
+            )
+
+        except ValueError:
+            continue
+
+        if fecha_tarea < hoy:
+            atrasadas.append(
+                tarea
+            )
+
+    if not atrasadas:
+
+        return (
+            "No tenés tareas atrasadas."
+        )
+
+    lineas = [
+        "Tus tareas atrasadas son:"
+    ]
+
+    for tarea in atrasadas:
+
+        dias = dias_de_atraso_tarea(
+            tarea[3]
+        )
+
+        prioridad = (
+            tarea[5]
+            if len(tarea) > 5 and tarea[5]
+            else "media"
+        )
+
+        atraso = (
+            "1 día"
+            if dias == 1
+            else f"{dias} días"
+        )
+
+        lineas.append(
+            f"{tarea[0]}. {tarea[1]} "
+            f"— venció {fecha_para_mostrar(tarea[3])} "
+            f"— {atraso} de atraso "
+            f"— prioridad {prioridad}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def mostrar_tareas_que_vencen(
+    fecha_objetivo,
+    etiqueta
+):
+    tareas = obtener_tareas_por_fecha(
+        fecha_objetivo
+    )
+
+    if not tareas:
+
+        return (
+            f"No tenés tareas que venzan {etiqueta}."
+        )
+
+    lineas = [
+        f"Tareas que vencen {etiqueta}:"
+    ]
+
+    for tarea in tareas:
+
+        prioridad = (
+            tarea[5]
+            if len(tarea) > 5 and tarea[5]
+            else "media"
+        )
+
+        lineas.append(
+            f"{tarea[0]}. {tarea[1]} "
+            f"— prioridad {prioridad}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def mostrar_vencimientos_hoy():
+    return mostrar_tareas_que_vencen(
+        date.today().isoformat(),
+        "hoy"
+    )
+
+
+def mostrar_vencimientos_manana():
+    return mostrar_tareas_que_vencen(
+        (
+            date.today()
+            + timedelta(days=1)
+        ).isoformat(),
+        "mañana"
     )
 
 
@@ -5569,9 +6245,16 @@ def agenda_para_fecha(
 
         for tarea in tareas:
 
+            prioridad = (
+                tarea[5]
+                if len(tarea) > 5 and tarea[5]
+                else "media"
+            )
+
             lineas.append(
                 f"- #{tarea[0]} "
-                f"{tarea[1]}"
+                f"{tarea[1]} "
+                f"[prioridad {prioridad}]"
             )
 
     return "\n".join(
@@ -5662,11 +6345,18 @@ def agenda_semana():
 
         for tarea in tareas:
 
+            prioridad = (
+                tarea[5]
+                if len(tarea) > 5 and tarea[5]
+                else "media"
+            )
+
             lineas.append(
                 f"- "
                 f"{fecha_para_mostrar(tarea[3])}: "
                 f"#{tarea[0]} "
-                f"{tarea[1]}"
+                f"{tarea[1]} "
+                f"[prioridad {prioridad}]"
             )
 
     return "\n".join(
@@ -6234,6 +6924,20 @@ def procesar_comandos_directos(
         mensaje
     )
 
+    # Las órdenes completas de prioridad + fecha deben resolverse
+    # antes que la edición contextual. Palabras como "pasala"
+    # también aparecen en órdenes completas y no deben confundirse
+    # con referencias a una acción anterior.
+    if es_cambio_combinado_tarea(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return cambiar_prioridad_y_fecha_tarea_desde_mensaje(
+            mensaje
+        )
+
     if es_edicion_contextual(
         mensaje
     ):
@@ -6347,6 +7051,16 @@ def procesar_comandos_directos(
             return mostrar_avisos_de_evento(
                 mensaje
             )
+
+    # CAMBIAR PRIORIDAD DE TAREA
+
+    if es_cambio_prioridad_tarea(
+        mensaje
+    ):
+
+        return cambiar_prioridad_tarea_desde_mensaje(
+            mensaje
+        )
 
     # CAMBIAR HORARIO DE AVISO DE TAREA
 
@@ -6576,6 +7290,75 @@ def procesar_comandos_directos(
     ):
 
         return agenda_semana()
+
+    # TAREAS POR URGENCIA REAL
+
+    if any(
+        patron in texto
+        for patron in (
+            "ordenalas por urgencia",
+            "ordena mis tareas por urgencia",
+            "tareas por urgencia",
+            "que tarea es mas urgente",
+            "que tareas son mas urgentes",
+            "mostrame las tareas mas urgentes",
+            "mostra las tareas mas urgentes",
+        )
+    ):
+
+        return mostrar_tareas_por_urgencia()
+
+    # VENCIMIENTOS DE TAREAS
+
+    if any(
+        patron in texto
+        for patron in (
+            "tareas atrasadas",
+            "tareas vencidas",
+            "que tareas estan atrasadas",
+            "que tareas tengo atrasadas",
+            "que tengo atrasado",
+            "que tareas vencieron",
+        )
+    ):
+
+        return mostrar_tareas_atrasadas()
+
+    if any(
+        patron in texto
+        for patron in (
+            "que tareas vencen hoy",
+            "que vence hoy",
+            "vencimientos de hoy",
+            "tareas que vencen hoy",
+        )
+    ):
+
+        return mostrar_vencimientos_hoy()
+
+    if any(
+        patron in texto
+        for patron in (
+            "que tareas vencen manana",
+            "que vence manana",
+            "vencimientos de manana",
+            "tareas que vencen manana",
+        )
+    ):
+
+        return mostrar_vencimientos_manana()
+
+    if any(
+        patron in texto
+        for patron in (
+            "que hago primero",
+            "por cual tarea empiezo",
+            "cual hago primero",
+            "cual deberia hacer primero",
+        )
+    ):
+
+        return mostrar_tareas_por_urgencia()
 
     # TAREAS
 
@@ -6918,15 +7701,24 @@ No escribas nada fuera del JSON.
 
         if titulo:
 
+            prioridad = (
+                extraer_prioridad_tarea(
+                    mensaje
+                )
+                or "media"
+            )
+
             tarea_id = crear_tarea(
                 titulo,
                 descripcion,
                 fecha,
+                prioridad,
             )
 
             respuesta = (
                 f"Listo. Agregué la tarea "
-                f"#{tarea_id}: {titulo}."
+                f"#{tarea_id}: {titulo}. "
+                f"Prioridad: {prioridad}."
             )
 
     elif accion == "crear_evento":
@@ -7062,6 +7854,11 @@ print("📅 Sincronización fecha de tarea ↔ recordatorios: activa")
 print("⏰ Edición de horario de avisos de tareas: activa")
 print("🛡️ Prioridad de edición de avisos de tareas: activa")
 print("🔎 Auditoría y limpieza tarea ↔ recordatorios: activa")
+print("🚩 Prioridades de tareas: activas")
+print("⏳ Vencimientos y tareas atrasadas: activos")
+print("🧩 Cambio combinado prioridad + fecha: activo")
+print("🛡️ Prioridad de órdenes combinadas sobre contexto: activa")
+print("🔥 Orden inteligente de tareas por urgencia: activo")
 print()
 print("Escribí 'salir' para terminar.")
 print()

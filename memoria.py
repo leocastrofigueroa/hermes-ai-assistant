@@ -60,10 +60,24 @@ def crear_base():
             descripcion TEXT,
             fecha TEXT,
             estado TEXT NOT NULL DEFAULT 'pendiente',
+            prioridad TEXT NOT NULL DEFAULT 'media',
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    columnas_tareas = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(tareas)"
+        ).fetchall()
+    }
+
+    if "prioridad" not in columnas_tareas:
+        cursor.execute("""
+            ALTER TABLE tareas
+            ADD COLUMN prioridad TEXT NOT NULL DEFAULT 'media'
+        """)
 
     # ------------------------------------------------------
     # EVENTOS
@@ -187,7 +201,8 @@ def obtener_recuerdos():
 def crear_tarea(
     titulo,
     descripcion="",
-    fecha=None
+    fecha=None,
+    prioridad="media"
 ):
     conexion = conectar()
     cursor = conexion.cursor()
@@ -197,13 +212,15 @@ def crear_tarea(
             titulo,
             descripcion,
             fecha,
-            estado
+            estado,
+            prioridad
         )
-        VALUES (?, ?, ?, 'pendiente')
+        VALUES (?, ?, ?, 'pendiente', ?)
     """, (
         titulo.strip(),
         descripcion.strip(),
-        fecha
+        fecha,
+        prioridad.strip().lower()
     ))
 
     tarea_id = cursor.lastrowid
@@ -224,7 +241,8 @@ def obtener_tareas_pendientes():
             titulo,
             descripcion,
             fecha,
-            estado
+            estado,
+            prioridad
         FROM tareas
         WHERE estado = 'pendiente'
         ORDER BY
@@ -233,6 +251,12 @@ def obtener_tareas_pendientes():
                 ELSE 0
             END,
             fecha ASC,
+            CASE prioridad
+                WHEN 'alta' THEN 0
+                WHEN 'media' THEN 1
+                WHEN 'baja' THEN 2
+                ELSE 1
+            END,
             id ASC
     """)
 
@@ -255,7 +279,8 @@ def obtener_tareas_por_fecha(
             titulo,
             descripcion,
             fecha,
-            estado
+            estado,
+            prioridad
         FROM tareas
         WHERE estado = 'pendiente'
           AND fecha = ?
@@ -284,7 +309,8 @@ def obtener_tareas_entre_fechas(
             titulo,
             descripcion,
             fecha,
-            estado
+            estado,
+            prioridad
         FROM tareas
         WHERE estado = 'pendiente'
           AND fecha BETWEEN ? AND ?
@@ -313,7 +339,8 @@ def obtener_tarea_por_id(
             titulo,
             descripcion,
             fecha,
-            estado
+            estado,
+            prioridad
         FROM tareas
         WHERE id = ?
         LIMIT 1
@@ -358,7 +385,8 @@ def modificar_tarea(
     tarea_id,
     fecha=None,
     titulo=None,
-    descripcion=None
+    descripcion=None,
+    prioridad=None
 ):
     actual = obtener_tarea_por_id(
         tarea_id
@@ -394,6 +422,16 @@ def modificar_tarea(
         else actual[3]
     )
 
+    prioridad_final = (
+        prioridad.strip().lower()
+        if prioridad is not None
+        else (
+            actual[5]
+            if len(actual) > 5 and actual[5]
+            else "media"
+        )
+    )
+
     conexion = conectar()
     cursor = conexion.cursor()
 
@@ -402,6 +440,7 @@ def modificar_tarea(
         SET titulo = ?,
             descripcion = ?,
             fecha = ?,
+            prioridad = ?,
             fecha_actualizacion = CURRENT_TIMESTAMP
         WHERE id = ?
           AND estado = 'pendiente'
@@ -409,6 +448,7 @@ def modificar_tarea(
         titulo_final,
         descripcion_final,
         fecha_final,
+        prioridad_final,
         tarea_id
     ))
 
