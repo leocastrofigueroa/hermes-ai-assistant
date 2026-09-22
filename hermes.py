@@ -7052,6 +7052,30 @@ def procesar_comandos_directos(
                 mensaje
             )
 
+    # CONSULTAS DE URGENCIA DE TAREAS
+    # Deben resolverse antes que los cambios de prioridad.
+
+    if any(
+        patron in texto
+        for patron in (
+            "que tarea es mas urgente",
+            "que tareas son mas urgentes",
+            "cual tarea es mas urgente",
+            "cuales tareas son mas urgentes",
+            "que hago primero",
+            "por cual tarea empiezo",
+            "cual hago primero",
+            "cual deberia hacer primero",
+            "ordena mis tareas por urgencia",
+            "ordenalas por urgencia",
+            "tareas por urgencia",
+            "mostrame las tareas mas urgentes",
+            "mostra las tareas mas urgentes",
+        )
+    ):
+
+        return mostrar_tareas_por_urgencia()
+
     # CAMBIAR PRIORIDAD DE TAREA
 
     if es_cambio_prioridad_tarea(
@@ -7859,6 +7883,7 @@ print("⏳ Vencimientos y tareas atrasadas: activos")
 print("🧩 Cambio combinado prioridad + fecha: activo")
 print("🛡️ Prioridad de órdenes combinadas sobre contexto: activa")
 print("🔥 Orden inteligente de tareas por urgencia: activo")
+print("🛡️ Consultas de urgencia protegidas frente a cambios de prioridad: activas")
 print()
 print("Escribí 'salir' para terminar.")
 print()
