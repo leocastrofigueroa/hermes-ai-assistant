@@ -111,6 +111,24 @@ def crear_base():
         """)
 
     # ------------------------------------------------------
+    # EVENTOS RECURRENTES
+    # ------------------------------------------------------
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eventos_recurrentes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            frecuencia TEXT NOT NULL,
+            dia_semana TEXT,
+            hora_inicio TEXT NOT NULL,
+            hora_fin TEXT,
+            estado TEXT NOT NULL DEFAULT 'activo',
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ------------------------------------------------------
     # EVENTOS
     # ------------------------------------------------------
 
@@ -123,10 +141,43 @@ def crear_base():
             hora_inicio TEXT,
             hora_fin TEXT,
             estado TEXT NOT NULL DEFAULT 'activo',
+            recurrente_id INTEGER,
+            fecha_ocurrencia TEXT,
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    columnas_eventos = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(eventos)"
+        ).fetchall()
+    }
+
+    if "recurrente_id" not in columnas_eventos:
+        cursor.execute("""
+            ALTER TABLE eventos
+            ADD COLUMN recurrente_id INTEGER
+        """)
+
+    if "fecha_ocurrencia" not in columnas_eventos:
+        cursor.execute("""
+            ALTER TABLE eventos
+            ADD COLUMN fecha_ocurrencia TEXT
+        """)
+
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_eventos_recurrentes_ocurrencia
+        ON eventos (
+            recurrente_id,
+            fecha_ocurrencia
+        )
+        WHERE recurrente_id IS NOT NULL
+          AND fecha_ocurrencia IS NOT NULL
+    """)
+
 
     conexion.commit()
     conexion.close()
@@ -817,6 +868,822 @@ def eliminar_rutina(
 
 
 # ==========================================================
+# EVENTOS RECURRENTES
+# ==========================================================
+
+def crear_evento_recurrente(
+    titulo,
+    frecuencia,
+    hora_inicio,
+    dia_semana=None,
+    hora_fin=None
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        INSERT INTO eventos_recurrentes (
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado
+        )
+        VALUES (?, ?, ?, ?, ?, 'activo')
+    """, (
+        titulo.strip(),
+        frecuencia.strip().lower(),
+        (
+            dia_semana.strip().lower()
+            if dia_semana
+            else None
+        ),
+        hora_inicio,
+        hora_fin,
+    ))
+
+    evento_id = cursor.lastrowid
+
+    conexion.commit()
+    conexion.close()
+
+    return evento_id
+
+
+def obtener_eventos_recurrentes():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos_recurrentes
+        WHERE estado != 'eliminado'
+        ORDER BY
+            CASE estado
+                WHEN 'activo' THEN 0
+                WHEN 'pausado' THEN 1
+                ELSE 2
+            END,
+            CASE frecuencia
+                WHEN 'diaria' THEN 0
+                WHEN 'semanal' THEN 1
+                ELSE 2
+            END,
+            CASE dia_semana
+                WHEN 'lunes' THEN 0
+                WHEN 'martes' THEN 1
+                WHEN 'miercoles' THEN 2
+                WHEN 'jueves' THEN 3
+                WHEN 'viernes' THEN 4
+                WHEN 'sabado' THEN 5
+                WHEN 'domingo' THEN 6
+                ELSE 7
+            END,
+            hora_inicio ASC,
+            id ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_eventos_recurrentes_activos():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos_recurrentes
+        WHERE estado = 'activo'
+        ORDER BY
+            CASE frecuencia
+                WHEN 'diaria' THEN 0
+                WHEN 'semanal' THEN 1
+                ELSE 2
+            END,
+            CASE dia_semana
+                WHEN 'lunes' THEN 0
+                WHEN 'martes' THEN 1
+                WHEN 'miercoles' THEN 2
+                WHEN 'jueves' THEN 3
+                WHEN 'viernes' THEN 4
+                WHEN 'sabado' THEN 5
+                WHEN 'domingo' THEN 6
+                ELSE 7
+            END,
+            hora_inicio ASC,
+            id ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_evento_recurrente_por_id(
+    evento_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos_recurrentes
+        WHERE id = ?
+        LIMIT 1
+    """, (
+        evento_id,
+    ))
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
+def cancelar_ocurrencias_futuras_recurrente(
+    recurrente_id
+):
+    ahora = datetime.now()
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            fecha,
+            hora_inicio
+        FROM eventos
+        WHERE recurrente_id = ?
+          AND estado = 'activo'
+    """, (
+        recurrente_id,
+    ))
+
+    filas = cursor.fetchall()
+
+    cancelados = 0
+
+    for evento_id, fecha, hora_inicio in filas:
+
+        try:
+            hora = (
+                hora_inicio
+                if hora_inicio
+                else "23:59"
+            )
+
+            momento = datetime.fromisoformat(
+                f"{fecha}T{hora}:00"
+            )
+
+        except (TypeError, ValueError):
+            continue
+
+        if momento < ahora:
+            continue
+
+        cursor.execute("""
+            UPDATE eventos
+            SET estado = 'cancelado',
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND estado = 'activo'
+        """, (
+            evento_id,
+        ))
+
+        cancelados += cursor.rowcount
+
+    conexion.commit()
+    conexion.close()
+
+    return cancelados
+
+
+def modificar_evento_recurrente(
+    evento_id,
+    titulo=None,
+    frecuencia=None,
+    dia_semana=None,
+    hora_inicio=None,
+    hora_fin=None
+):
+    actual = obtener_evento_recurrente_por_id(
+        evento_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[6] == "eliminado":
+        return (
+            "eliminado",
+            evento_id
+        )
+
+    titulo_final = (
+        titulo.strip()
+        if titulo is not None
+        else actual[1]
+    )
+
+    frecuencia_final = (
+        frecuencia.strip().lower()
+        if frecuencia is not None
+        else actual[2]
+    )
+
+    if frecuencia_final == "diaria":
+        dia_final = None
+    elif dia_semana is not None:
+        dia_final = (
+            dia_semana.strip().lower()
+            if dia_semana
+            else None
+        )
+    else:
+        dia_final = actual[3]
+
+    hora_inicio_final = (
+        hora_inicio
+        if hora_inicio is not None
+        else actual[4]
+    )
+
+    hora_fin_final = (
+        hora_fin
+        if hora_fin is not None
+        else actual[5]
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE eventos_recurrentes
+        SET titulo = ?,
+            frecuencia = ?,
+            dia_semana = ?,
+            hora_inicio = ?,
+            hora_fin = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado != 'eliminado'
+    """, (
+        titulo_final,
+        frecuencia_final,
+        dia_final,
+        hora_inicio_final,
+        hora_fin_final,
+        evento_id,
+    ))
+
+    actualizado = (
+        cursor.rowcount > 0
+    )
+
+    conexion.commit()
+    conexion.close()
+
+    if not actualizado:
+        return (
+            "sin_cambios",
+            evento_id
+        )
+
+    cancelar_ocurrencias_futuras_recurrente(
+        evento_id
+    )
+
+    return (
+        "actualizado",
+        evento_id
+    )
+
+
+def cambiar_estado_evento_recurrente(
+    evento_id,
+    nuevo_estado
+):
+    if nuevo_estado not in (
+        "activo",
+        "pausado",
+    ):
+        return (
+            "estado_invalido",
+            evento_id
+        )
+
+    actual = obtener_evento_recurrente_por_id(
+        evento_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[6] == "eliminado":
+        return (
+            "eliminado",
+            evento_id
+        )
+
+    if actual[6] == nuevo_estado:
+        return (
+            "sin_cambios",
+            evento_id
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE eventos_recurrentes
+        SET estado = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado != 'eliminado'
+    """, (
+        nuevo_estado,
+        evento_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    if nuevo_estado == "pausado":
+        cancelar_ocurrencias_futuras_recurrente(
+            evento_id
+        )
+
+    return (
+        "actualizado",
+        evento_id
+    )
+
+
+def eliminar_evento_recurrente(
+    evento_id
+):
+    actual = obtener_evento_recurrente_por_id(
+        evento_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[6] == "eliminado":
+        return (
+            "ya_eliminado",
+            evento_id
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE eventos_recurrentes
+        SET estado = 'eliminado',
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (
+        evento_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    cancelar_ocurrencias_futuras_recurrente(
+        evento_id
+    )
+
+    return (
+        "eliminado",
+        evento_id
+    )
+
+
+def auditar_y_limpiar_eventos_recurrentes():
+    dias_validos = {
+        "lunes",
+        "martes",
+        "miercoles",
+        "jueves",
+        "viernes",
+        "sabado",
+        "domingo",
+    }
+
+    estados_validos = {
+        "activo",
+        "pausado",
+        "eliminado",
+    }
+
+    frecuencias_validas = {
+        "diaria",
+        "semanal",
+    }
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos_recurrentes
+        ORDER BY id ASC
+    """)
+
+    recurrentes = cursor.fetchall()
+
+    revisados = 0
+    corregidos = 0
+    pausados = 0
+    ocurrencias_canceladas = 0
+    duplicados = []
+    observaciones = []
+
+    reglas_vistas = {}
+
+    for recurrente in recurrentes:
+        (
+            recurrente_id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado,
+        ) = recurrente
+
+        revisados += 1
+
+        # Las recurrencias eliminadas se conservan como historial.
+        if estado == "eliminado":
+            continue
+
+        # Estado inválido: se pausa para evitar ejecuciones inesperadas.
+        if estado not in estados_validos:
+            cursor.execute("""
+                UPDATE eventos_recurrentes
+                SET estado = 'pausado',
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                recurrente_id,
+            ))
+
+            estado = "pausado"
+            pausados += 1
+            observaciones.append(
+                f"#{recurrente_id} tenía un estado inválido y fue pausado."
+            )
+
+        # Frecuencia inválida: pausar es más seguro que adivinar.
+        if frecuencia not in frecuencias_validas:
+            cursor.execute("""
+                UPDATE eventos_recurrentes
+                SET estado = 'pausado',
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                recurrente_id,
+            ))
+
+            estado = "pausado"
+            pausados += 1
+            observaciones.append(
+                f"#{recurrente_id} tenía una frecuencia inválida y fue pausado."
+            )
+
+        # Una diaria no necesita día de semana.
+        if frecuencia == "diaria" and dia_semana is not None:
+            cursor.execute("""
+                UPDATE eventos_recurrentes
+                SET dia_semana = NULL,
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                recurrente_id,
+            ))
+
+            dia_semana = None
+            corregidos += 1
+            observaciones.append(
+                f"#{recurrente_id} era diaria y tenía día de semana; lo corregí."
+            )
+
+        # Una semanal necesita un día válido.
+        if (
+            frecuencia == "semanal"
+            and dia_semana not in dias_validos
+        ):
+            if estado != "pausado":
+                cursor.execute("""
+                    UPDATE eventos_recurrentes
+                    SET estado = 'pausado',
+                        fecha_actualizacion = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (
+                    recurrente_id,
+                ))
+                estado = "pausado"
+                pausados += 1
+
+            observaciones.append(
+                f"#{recurrente_id} no tenía un día semanal válido y fue pausado."
+            )
+
+        # Validamos horarios con formato HH:MM.
+        hora_inicio_valida = True
+
+        try:
+            datetime.strptime(
+                hora_inicio,
+                "%H:%M"
+            )
+
+        except (TypeError, ValueError):
+            hora_inicio_valida = False
+
+        hora_fin_valida = True
+
+        if hora_fin is not None:
+            try:
+                datetime.strptime(
+                    hora_fin,
+                    "%H:%M"
+                )
+
+            except (TypeError, ValueError):
+                hora_fin_valida = False
+
+        if not hora_inicio_valida or not hora_fin_valida:
+            if estado != "pausado":
+                cursor.execute("""
+                    UPDATE eventos_recurrentes
+                    SET estado = 'pausado',
+                        fecha_actualizacion = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (
+                    recurrente_id,
+                ))
+                estado = "pausado"
+                pausados += 1
+
+            observaciones.append(
+                f"#{recurrente_id} tenía un horario inválido y fue pausado."
+            )
+
+        # Detectamos reglas exactamente duplicadas, pero no eliminamos ninguna.
+        clave = (
+            (titulo or "").strip().lower(),
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado,
+        )
+
+        if estado != "eliminado":
+            if clave in reglas_vistas:
+                duplicados.append(
+                    (
+                        reglas_vistas[clave],
+                        recurrente_id,
+                    )
+                )
+            else:
+                reglas_vistas[clave] = recurrente_id
+
+    # Cancelamos ocurrencias futuras huérfanas:
+    # están vinculadas a una recurrencia que no existe o fue eliminada.
+    ahora = datetime.now()
+
+    cursor.execute("""
+        SELECT
+            e.id,
+            e.fecha,
+            e.hora_inicio,
+            e.recurrente_id,
+            r.estado
+        FROM eventos e
+        LEFT JOIN eventos_recurrentes r
+          ON r.id = e.recurrente_id
+        WHERE e.recurrente_id IS NOT NULL
+          AND e.estado = 'activo'
+    """)
+
+    ocurrencias = cursor.fetchall()
+
+    for (
+        evento_id,
+        fecha,
+        hora_inicio,
+        recurrente_id,
+        estado_recurrente,
+    ) in ocurrencias:
+
+        try:
+            hora = (
+                hora_inicio
+                if hora_inicio
+                else "23:59"
+            )
+
+            momento = datetime.fromisoformat(
+                f"{fecha}T{hora}:00"
+            )
+
+        except (TypeError, ValueError):
+            continue
+
+        if momento < ahora:
+            continue
+
+        if (
+            estado_recurrente is None
+            or estado_recurrente in (
+                "pausado",
+                "eliminado",
+            )
+        ):
+            cursor.execute("""
+                UPDATE eventos
+                SET estado = 'cancelado',
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND estado = 'activo'
+            """, (
+                evento_id,
+            ))
+
+            ocurrencias_canceladas += cursor.rowcount
+
+    # Cancelamos ocurrencias futuras que ya no coinciden con su regla.
+    cursor.execute("""
+        SELECT
+            e.id,
+            e.fecha,
+            e.hora_inicio,
+            e.hora_fin,
+            e.recurrente_id,
+            r.titulo,
+            r.frecuencia,
+            r.dia_semana,
+            r.hora_inicio,
+            r.hora_fin,
+            r.estado,
+            e.titulo
+        FROM eventos e
+        JOIN eventos_recurrentes r
+          ON r.id = e.recurrente_id
+        WHERE e.estado = 'activo'
+          AND r.estado = 'activo'
+    """)
+
+    vinculadas = cursor.fetchall()
+
+    indice_dias = {
+        "lunes": 0,
+        "martes": 1,
+        "miercoles": 2,
+        "jueves": 3,
+        "viernes": 4,
+        "sabado": 5,
+        "domingo": 6,
+    }
+
+    for fila in vinculadas:
+        (
+            evento_id,
+            fecha,
+            evento_hora_inicio,
+            evento_hora_fin,
+            recurrente_id,
+            titulo_regla,
+            frecuencia,
+            dia_semana,
+            regla_hora_inicio,
+            regla_hora_fin,
+            estado_regla,
+            titulo_evento,
+        ) = fila
+
+        try:
+            fecha_obj = datetime.strptime(
+                fecha,
+                "%Y-%m-%d"
+            ).date()
+
+            hora = (
+                evento_hora_inicio
+                if evento_hora_inicio
+                else "23:59"
+            )
+
+            momento = datetime.fromisoformat(
+                f"{fecha}T{hora}:00"
+            )
+
+        except (TypeError, ValueError):
+            continue
+
+        if momento < ahora:
+            continue
+
+        coincide_dia = True
+
+        if frecuencia == "semanal":
+            dia_objetivo = indice_dias.get(
+                dia_semana
+            )
+
+            coincide_dia = (
+                dia_objetivo is not None
+                and fecha_obj.weekday() == dia_objetivo
+            )
+
+        coincide = (
+            coincide_dia
+            and evento_hora_inicio == regla_hora_inicio
+            and evento_hora_fin == regla_hora_fin
+            and (titulo_evento or "").strip()
+                == (titulo_regla or "").strip()
+        )
+
+        if not coincide:
+            cursor.execute("""
+                UPDATE eventos
+                SET estado = 'cancelado',
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND estado = 'activo'
+            """, (
+                evento_id,
+            ))
+
+            ocurrencias_canceladas += cursor.rowcount
+
+    conexion.commit()
+    conexion.close()
+
+    return {
+        "revisados": revisados,
+        "corregidos": corregidos,
+        "pausados": pausados,
+        "ocurrencias_canceladas": ocurrencias_canceladas,
+        "duplicados": duplicados,
+        "observaciones": observaciones,
+    }
+
+
+# ==========================================================
 # EVENTOS
 # ==========================================================
 
@@ -825,7 +1692,9 @@ def crear_evento(
     fecha,
     hora_inicio=None,
     hora_fin=None,
-    descripcion=""
+    descripcion="",
+    recurrente_id=None,
+    fecha_ocurrencia=None
 ):
     conexion = conectar()
     cursor = conexion.cursor()
@@ -837,15 +1706,19 @@ def crear_evento(
             fecha,
             hora_inicio,
             hora_fin,
-            estado
+            estado,
+            recurrente_id,
+            fecha_ocurrencia
         )
-        VALUES (?, ?, ?, ?, ?, 'activo')
+        VALUES (?, ?, ?, ?, ?, 'activo', ?, ?)
     """, (
         titulo.strip(),
         descripcion.strip(),
         fecha,
         hora_inicio,
-        hora_fin
+        hora_fin,
+        recurrente_id,
+        fecha_ocurrencia
     ))
 
     evento_id = cursor.lastrowid

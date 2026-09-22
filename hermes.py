@@ -23,6 +23,14 @@ from memoria import (
     modificar_rutina,
     cambiar_estado_rutina,
     eliminar_rutina,
+    crear_evento_recurrente,
+    obtener_eventos_recurrentes,
+    obtener_eventos_recurrentes_activos,
+    obtener_evento_recurrente_por_id,
+    modificar_evento_recurrente,
+    cambiar_estado_evento_recurrente,
+    eliminar_evento_recurrente,
+    auditar_y_limpiar_eventos_recurrentes,
     crear_evento,
     obtener_eventos_activos,
     obtener_eventos_por_fecha,
@@ -5827,6 +5835,987 @@ def mostrar_tareas_pendientes():
 
 
 
+
+# ==========================================================
+# EVENTOS RECURRENTES
+# ==========================================================
+
+def extraer_recurrencia_evento(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if any(
+        expresion in texto
+        for expresion in (
+            "todos los dias",
+            "cada dia",
+            "diariamente",
+        )
+    ):
+        return (
+            "diaria",
+            None
+        )
+
+    for dia in DIAS_SEMANA_RUTINA:
+
+        if any(
+            expresion in texto
+            for expresion in (
+                f"todos los {dia}",
+                f"cada {dia}",
+            )
+        ):
+            return (
+                "semanal",
+                dia
+            )
+
+    return (
+        None,
+        None
+    )
+
+
+def es_creacion_evento_recurrente(
+    mensaje
+):
+    frecuencia, _ = extraer_recurrencia_evento(
+        mensaje
+    )
+
+    if not frecuencia:
+        return False
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    # Evitamos capturar recordatorios/rutinas recurrentes.
+    if any(
+        palabra in texto
+        for palabra in (
+            "recordame",
+            "recordar",
+            "rutina",
+        )
+    ):
+        return False
+
+    hora_inicio, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    tiene_evento = any(
+        expresion in texto
+        for expresion in (
+            "tengo",
+            "hay",
+            "evento",
+            "reunion",
+            "reunión",
+            "clase",
+            "turno",
+            "cita",
+        )
+    )
+
+    return (
+        tiene_evento
+        and hora_inicio is not None
+    )
+
+
+def extraer_titulo_evento_recurrente(
+    mensaje
+):
+    titulo = mensaje.strip()
+
+    patrones = (
+        r"^\s*todos\s+los\s+d[ií]as?\s*",
+        r"^\s*cada\s+d[ií]a\s*",
+        r"^\s*diariamente\s*",
+        r"^\s*todos\s+los\s+lunes\s*",
+        r"^\s*todos\s+los\s+martes\s*",
+        r"^\s*todos\s+los\s+mi[eé]rcoles\s*",
+        r"^\s*todos\s+los\s+jueves\s*",
+        r"^\s*todos\s+los\s+viernes\s*",
+        r"^\s*todos\s+los\s+s[aá]bados\s*",
+        r"^\s*todos\s+los\s+domingos\s*",
+        r"^\s*cada\s+lunes\s*",
+        r"^\s*cada\s+martes\s*",
+        r"^\s*cada\s+mi[eé]rcoles\s*",
+        r"^\s*cada\s+jueves\s*",
+        r"^\s*cada\s+viernes\s*",
+        r"^\s*cada\s+s[aá]bado\s*",
+        r"^\s*cada\s+domingo\s*",
+    )
+
+    for patron in patrones:
+        titulo = re.sub(
+            patron,
+            "",
+            titulo,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    titulo = re.sub(
+        r"\b(?:a\s+las?|a\s+la)\s+\d{1,2}(?::\d{2})?\b",
+        " ",
+        titulo,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"^\s*(?:tengo|hay)\s+",
+        "",
+        titulo,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    # Quitamos expresiones de duración para que no formen parte
+    # del nombre del evento recurrente.
+    titulo = re.sub(
+        r"\b(?:por|durante)\s+"
+        r"(?:\d+|una?|media)\s+"
+        r"(?:hora|horas|minuto|minutos)\b",
+        " ",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\bdura\s+"
+        r"(?:\d+|una?|media)\s+"
+        r"(?:hora|horas|minuto|minutos)\b",
+        " ",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\s+",
+        " ",
+        titulo
+    ).strip(" .,-")
+
+    if titulo:
+        titulo = (
+            titulo[0].upper()
+            + titulo[1:]
+        )
+
+    return titulo
+
+
+def crear_evento_recurrente_desde_mensaje(
+    mensaje
+):
+    frecuencia, dia_semana = extraer_recurrencia_evento(
+        mensaje
+    )
+
+    if not frecuencia:
+
+        return (
+            "No pude identificar cada cuánto "
+            "se repite el evento."
+        )
+
+    hora_inicio, hora_fin = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not hora_inicio:
+
+        return (
+            "Necesito saber a qué hora "
+            "empieza el evento recurrente."
+        )
+
+    duracion = extraer_duracion_evento_minutos(
+        mensaje
+    )
+
+    if (
+        not hora_fin
+        and duracion is not None
+    ):
+
+        fecha_referencia = date.today().isoformat()
+
+        hora_fin = calcular_hora_fin_por_duracion(
+            fecha_referencia,
+            hora_inicio,
+            duracion
+        )
+
+    titulo = extraer_titulo_evento_recurrente(
+        mensaje
+    )
+
+    if not titulo:
+
+        return (
+            "No pude identificar el nombre "
+            "del evento recurrente."
+        )
+
+    existentes = obtener_eventos_recurrentes_activos()
+
+    for evento in existentes:
+
+        if (
+            normalizar_texto(evento[1])
+            == normalizar_texto(titulo)
+            and evento[2] == frecuencia
+            and evento[3] == dia_semana
+            and evento[4] == hora_inicio
+            and evento[5] == hora_fin
+        ):
+
+            return (
+                f"Ese evento recurrente ya existe "
+                f"como #{evento[0]}."
+            )
+
+    evento_id = crear_evento_recurrente(
+        titulo=titulo,
+        frecuencia=frecuencia,
+        dia_semana=dia_semana,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+    )
+
+    if frecuencia == "diaria":
+
+        recurrencia = "todos los días"
+
+    else:
+
+        recurrencia = (
+            f"todos los {dia_semana}"
+        )
+
+    respuesta = (
+        f"Listo. Creé el evento recurrente "
+        f"#{evento_id}: {titulo} — "
+        f"{recurrencia} a las {hora_inicio}"
+    )
+
+    if hora_fin:
+        respuesta += (
+            f" hasta las {hora_fin}"
+        )
+
+    respuesta += "."
+
+    return respuesta
+
+
+
+def buscar_evento_recurrente_desde_mensaje(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    coincidencia = re.search(
+        r"(?:evento\s+recurrente|recurrente)\s*#?\s*(\d+)\b",
+        texto
+    )
+
+    if coincidencia:
+
+        evento = obtener_evento_recurrente_por_id(
+            int(coincidencia.group(1))
+        )
+
+        if evento and evento[6] != "eliminado":
+            return evento
+
+    eventos = obtener_eventos_recurrentes()
+
+    candidatos = []
+
+    for evento in eventos:
+
+        puntuacion = puntuacion_coincidencia(
+            mensaje,
+            evento[1]
+        )
+
+        if puntuacion > 0:
+
+            candidatos.append(
+                (
+                    puntuacion,
+                    evento,
+                )
+            )
+
+    if not candidatos:
+        return None
+
+    candidatos.sort(
+        key=lambda elemento: (
+            -elemento[0],
+            elemento[1][0],
+        )
+    )
+
+    return candidatos[0][1]
+
+
+def es_pausa_evento_recurrente(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return (
+        "recurrente" in texto
+        and any(
+            expresion in texto
+            for expresion in (
+                "pausa",
+                "pausar",
+                "suspende",
+                "suspender",
+                "detene",
+                "detener",
+            )
+        )
+    )
+
+
+def es_reanudacion_evento_recurrente(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return (
+        "recurrente" in texto
+        and any(
+            expresion in texto
+            for expresion in (
+                "reanuda",
+                "reanudar",
+                "reactiva",
+                "reactivar",
+                "activa",
+                "activar",
+            )
+        )
+    )
+
+
+def es_eliminacion_evento_recurrente(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return (
+        "recurrente" in texto
+        and any(
+            expresion in texto
+            for expresion in (
+                "elimina",
+                "eliminar",
+                "borra",
+                "borrar",
+                "cancela",
+                "cancelar",
+                "quita",
+                "quitar",
+            )
+        )
+    )
+
+
+def es_renombrado_evento_recurrente(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return (
+        "recurrente" in texto
+        and any(
+            expresion in texto
+            for expresion in (
+                "renombra",
+                "renombrar",
+                "cambia el nombre",
+                "cambiar el nombre",
+            )
+        )
+    )
+
+
+def extraer_nuevo_titulo_evento_recurrente(
+    mensaje
+):
+    patrones = (
+        r"(?:renombr[áa]|renombrar)\s+"
+        r"(?:el\s+)?(?:evento\s+)?recurrente\s+"
+        r"(?:#?\d+|.+?)\s+a\s+(.+)$",
+        r"(?:cambi[áa]|cambiar)\s+el\s+nombre\s+"
+        r"(?:del\s+)?(?:evento\s+)?recurrente\s+"
+        r"(?:#?\d+|.+?)\s+a\s+(.+)$",
+    )
+
+    for patron in patrones:
+
+        coincidencia = re.search(
+            patron,
+            mensaje,
+            flags=re.IGNORECASE,
+        )
+
+        if coincidencia:
+
+            titulo = coincidencia.group(1).strip(
+                " .,-"
+            )
+
+            if titulo:
+
+                return (
+                    titulo[0].upper()
+                    + titulo[1:]
+                )
+
+    return None
+
+
+def es_edicion_evento_recurrente(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if "recurrente" not in texto:
+        return False
+
+    if (
+        es_pausa_evento_recurrente(mensaje)
+        or es_reanudacion_evento_recurrente(mensaje)
+        or es_eliminacion_evento_recurrente(mensaje)
+        or es_renombrado_evento_recurrente(mensaje)
+    ):
+        return False
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "cambia",
+            "cambiar",
+            "move",
+            "mover",
+            "pasa",
+            "pasar",
+            "edita",
+            "editar",
+            "reprograma",
+            "reprogramar",
+        )
+    )
+
+    hora_inicio, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    frecuencia, _ = extraer_recurrencia_evento(
+        mensaje
+    )
+
+    return (
+        accion
+        and (
+            hora_inicio is not None
+            or frecuencia is not None
+        )
+    )
+
+
+def pausar_evento_recurrente_desde_mensaje(
+    mensaje
+):
+    evento = buscar_evento_recurrente_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+
+        return (
+            "No pude identificar qué evento "
+            "recurrente querés pausar."
+        )
+
+    estado, _ = cambiar_estado_evento_recurrente(
+        evento[0],
+        "pausado"
+    )
+
+    if estado == "sin_cambios":
+
+        return (
+            f"El evento recurrente #{evento[0]}: "
+            f"{evento[1]} ya estaba pausado."
+        )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude pausar ese evento recurrente."
+        )
+
+    return (
+        f"Listo. Pausé el evento recurrente "
+        f"#{evento[0]}: {evento[1]}. "
+        f"También cancelé sus próximas ocurrencias "
+        f"materializadas."
+    )
+
+
+def reanudar_evento_recurrente_desde_mensaje(
+    mensaje
+):
+    evento = buscar_evento_recurrente_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+
+        return (
+            "No pude identificar qué evento "
+            "recurrente querés reanudar."
+        )
+
+    estado, _ = cambiar_estado_evento_recurrente(
+        evento[0],
+        "activo"
+    )
+
+    if estado == "sin_cambios":
+
+        return (
+            f"El evento recurrente #{evento[0]}: "
+            f"{evento[1]} ya estaba activo."
+        )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude reanudar ese evento recurrente."
+        )
+
+    return (
+        f"Listo. Reanudé el evento recurrente "
+        f"#{evento[0]}: {evento[1]}. "
+        f"El motor generará su próxima ocurrencia."
+    )
+
+
+def eliminar_evento_recurrente_desde_mensaje(
+    mensaje
+):
+    evento = buscar_evento_recurrente_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+
+        return (
+            "No pude identificar qué evento "
+            "recurrente querés eliminar."
+        )
+
+    estado, _ = eliminar_evento_recurrente(
+        evento[0]
+    )
+
+    if estado == "ya_eliminado":
+
+        return (
+            f"El evento recurrente #{evento[0]}: "
+            f"{evento[1]} ya estaba eliminado."
+        )
+
+    if estado != "eliminado":
+
+        return (
+            "No pude eliminar ese evento recurrente."
+        )
+
+    return (
+        f"Listo. Eliminé el evento recurrente "
+        f"#{evento[0]}: {evento[1]} "
+        f"y cancelé sus próximas ocurrencias."
+    )
+
+
+def renombrar_evento_recurrente_desde_mensaje(
+    mensaje
+):
+    evento = buscar_evento_recurrente_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+
+        return (
+            "No pude identificar qué evento "
+            "recurrente querés renombrar."
+        )
+
+    nuevo_titulo = extraer_nuevo_titulo_evento_recurrente(
+        mensaje
+    )
+
+    if not nuevo_titulo:
+
+        return (
+            "No pude identificar el nuevo nombre "
+            "del evento recurrente."
+        )
+
+    estado, _ = modificar_evento_recurrente(
+        evento[0],
+        titulo=nuevo_titulo
+    )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude renombrar ese evento recurrente."
+        )
+
+    return (
+        f"Listo. Renombré el evento recurrente "
+        f"#{evento[0]} como {nuevo_titulo}. "
+        f"El motor regenerará su próxima ocurrencia."
+    )
+
+
+def editar_evento_recurrente_desde_mensaje(
+    mensaje
+):
+    evento = buscar_evento_recurrente_desde_mensaje(
+        mensaje
+    )
+
+    if not evento:
+
+        return (
+            "No pude identificar qué evento "
+            "recurrente querés editar."
+        )
+
+    frecuencia_nueva, dia_nuevo = extraer_recurrencia_evento(
+        mensaje
+    )
+
+    hora_inicio_nueva, hora_fin_nueva = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    duracion = extraer_duracion_evento_minutos(
+        mensaje
+    )
+
+    if (
+        hora_inicio_nueva
+        and not hora_fin_nueva
+        and duracion is not None
+    ):
+
+        fecha_referencia = date.today().isoformat()
+
+        hora_fin_nueva = calcular_hora_fin_por_duracion(
+            fecha_referencia,
+            hora_inicio_nueva,
+            duracion
+        )
+
+    if (
+        frecuencia_nueva is None
+        and hora_inicio_nueva is None
+        and hora_fin_nueva is None
+    ):
+
+        return (
+            "No pude identificar qué querés cambiar "
+            "del evento recurrente."
+        )
+
+    estado, _ = modificar_evento_recurrente(
+        evento[0],
+        frecuencia=frecuencia_nueva,
+        dia_semana=dia_nuevo,
+        hora_inicio=hora_inicio_nueva,
+        hora_fin=hora_fin_nueva,
+    )
+
+    if estado != "actualizado":
+
+        return (
+            "No pude editar ese evento recurrente."
+        )
+
+    actualizado = obtener_evento_recurrente_por_id(
+        evento[0]
+    )
+
+    if actualizado[2] == "diaria":
+
+        recurrencia = "todos los días"
+
+    else:
+
+        recurrencia = (
+            f"todos los {actualizado[3]}"
+        )
+
+    respuesta = (
+        f"Listo. Actualicé el evento recurrente "
+        f"#{actualizado[0]}: {actualizado[1]} "
+        f"— {recurrencia} "
+        f"a las {actualizado[4]}"
+    )
+
+    if actualizado[5]:
+        respuesta += (
+            f" hasta las {actualizado[5]}"
+        )
+
+    respuesta += (
+        ". El motor regenerará su próxima ocurrencia."
+    )
+
+    return respuesta
+
+
+def mostrar_eventos_recurrentes():
+    eventos = obtener_eventos_recurrentes()
+
+    if not eventos:
+
+        return (
+            "No tenés eventos recurrentes activos."
+        )
+
+    lineas = [
+        "Tus eventos recurrentes son:"
+    ]
+
+    for evento in eventos:
+
+        if evento[2] == "diaria":
+
+            frecuencia = "todos los días"
+
+        else:
+
+            frecuencia = (
+                f"todos los {evento[3]}"
+            )
+
+        texto = (
+            f"{evento[0]}. {evento[1]} "
+            f"— {frecuencia} "
+            f"a las {evento[4]}"
+        )
+
+        if evento[5]:
+            texto += (
+                f" hasta las {evento[5]}"
+            )
+
+        estado_texto = (
+            "activo"
+            if evento[6] == "activo"
+            else "pausado"
+        )
+
+        texto += (
+            f" — {estado_texto}"
+        )
+
+        lineas.append(
+            texto
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def es_auditoria_eventos_recurrentes(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    tiene_recurrencia = any(
+        expresion in texto
+        for expresion in (
+            "eventos recurrentes",
+            "recurrencias de eventos",
+            "recurrencias",
+        )
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "revisa",
+            "revisar",
+            "audita",
+            "auditar",
+            "limpia",
+            "limpiar",
+            "verifica",
+            "verificar",
+            "corrobora",
+            "corroborar",
+        )
+    )
+
+    return (
+        tiene_recurrencia
+        and accion
+    )
+
+
+def revisar_y_limpiar_eventos_recurrentes():
+    resultado = auditar_y_limpiar_eventos_recurrentes()
+
+    revisados = resultado[
+        "revisados"
+    ]
+
+    corregidos = resultado[
+        "corregidos"
+    ]
+
+    pausados = resultado[
+        "pausados"
+    ]
+
+    ocurrencias_canceladas = resultado[
+        "ocurrencias_canceladas"
+    ]
+
+    duplicados = resultado[
+        "duplicados"
+    ]
+
+    observaciones = resultado[
+        "observaciones"
+    ]
+
+    if (
+        corregidos == 0
+        and pausados == 0
+        and ocurrencias_canceladas == 0
+        and not duplicados
+        and not observaciones
+    ):
+        return (
+            "Eventos recurrentes correctos. "
+            f"Revisé {revisados} recurrencias "
+            "y no encontré inconsistencias."
+        )
+
+    partes = [
+        (
+            f"Auditoría terminada. "
+            f"Revisé {revisados} recurrencias."
+        )
+    ]
+
+    if corregidos:
+        partes.append(
+            f"Corregí {corregidos} "
+            f"{'dato seguro' if corregidos == 1 else 'datos seguros'}."
+        )
+
+    if pausados:
+        partes.append(
+            f"Pausé {pausados} "
+            f"{'recurrencia inválida' if pausados == 1 else 'recurrencias inválidas'}."
+        )
+
+    if ocurrencias_canceladas:
+        partes.append(
+            f"Cancelé {ocurrencias_canceladas} "
+            f"{'ocurrencia futura inconsistente' if ocurrencias_canceladas == 1 else 'ocurrencias futuras inconsistentes'}."
+        )
+
+    if duplicados:
+        pares = ", ".join(
+            f"#{primero} y #{segundo}"
+            for primero, segundo in duplicados
+        )
+
+        partes.append(
+            "Detecté posibles duplicados exactos "
+            f"({pares}), pero no los eliminé "
+            "porque eso requiere tu decisión."
+        )
+
+    if observaciones:
+        partes.append(
+            "Detalles: "
+            + " ".join(observaciones)
+        )
+
+    partes.append(
+        "El motor puede regenerar las próximas "
+        "ocurrencias válidas cuando corresponda."
+    )
+
+    return " ".join(
+        partes
+    )
+
+
+def es_consulta_eventos_recurrentes(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        expresion in texto
+        for expresion in (
+            "que eventos recurrentes tengo",
+            "mis eventos recurrentes",
+            "eventos recurrentes",
+            "mostrame mis eventos recurrentes",
+            "mostra mis eventos recurrentes",
+        )
+    )
+
+
 # ==========================================================
 # RUTINAS RECURRENTES
 # ==========================================================
@@ -7968,6 +8957,71 @@ def procesar_comandos_directos(
         return revisar_sincronizacion_eventos()
 
     # ======================================================
+    # EVENTOS RECURRENTES
+    # Deben resolverse antes que eventos normales y rutinas.
+    # ======================================================
+
+    if es_auditoria_eventos_recurrentes(
+        mensaje
+    ):
+
+        return revisar_y_limpiar_eventos_recurrentes()
+
+    if es_pausa_evento_recurrente(
+        mensaje
+    ):
+
+        return pausar_evento_recurrente_desde_mensaje(
+            mensaje
+        )
+
+    if es_reanudacion_evento_recurrente(
+        mensaje
+    ):
+
+        return reanudar_evento_recurrente_desde_mensaje(
+            mensaje
+        )
+
+    if es_eliminacion_evento_recurrente(
+        mensaje
+    ):
+
+        return eliminar_evento_recurrente_desde_mensaje(
+            mensaje
+        )
+
+    if es_renombrado_evento_recurrente(
+        mensaje
+    ):
+
+        return renombrar_evento_recurrente_desde_mensaje(
+            mensaje
+        )
+
+    if es_edicion_evento_recurrente(
+        mensaje
+    ):
+
+        return editar_evento_recurrente_desde_mensaje(
+            mensaje
+        )
+
+    if es_consulta_eventos_recurrentes(
+        mensaje
+    ):
+
+        return mostrar_eventos_recurrentes()
+
+    if es_creacion_evento_recurrente(
+        mensaje
+    ):
+
+        return crear_evento_recurrente_desde_mensaje(
+            mensaje
+        )
+
+    # ======================================================
     # RUTINAS RECURRENTES
     # Deben resolverse antes que los recordatorios normales,
     # para que "todos los días..." no cree un aviso único.
@@ -8905,6 +9959,10 @@ print("🔁 Rutinas recurrentes: creación y consulta activas")
 print("⏰ Ejecución automática de rutinas: integrada al motor")
 print("🎛️ Pausa, reanudación y edición de rutinas: activas")
 print("🧪 Auditoría, limpieza y eliminación de rutinas: activas")
+print("🔁 Eventos recurrentes: creación y consulta activas")
+print("🗓️ Próximas ocurrencias recurrentes: materialización automática activa")
+print("🎛️ Edición, pausa, reanudación y eliminación de eventos recurrentes: activas")
+print("🧪 Auditoría y limpieza de eventos recurrentes: activas")
 print()
 print("Escribí 'salir' para terminar.")
 print()

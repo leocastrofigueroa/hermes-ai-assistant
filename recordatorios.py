@@ -87,6 +87,66 @@ def crear_tabla_recordatorios():
             ADD COLUMN ultimo_disparo TEXT
         """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eventos_recurrentes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            frecuencia TEXT NOT NULL,
+            dia_semana TEXT,
+            hora_inicio TEXT NOT NULL,
+            hora_fin TEXT,
+            estado TEXT NOT NULL DEFAULT 'activo',
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eventos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            descripcion TEXT,
+            fecha TEXT NOT NULL,
+            hora_inicio TEXT,
+            hora_fin TEXT,
+            estado TEXT NOT NULL DEFAULT 'activo',
+            recurrente_id INTEGER,
+            fecha_ocurrencia TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    columnas_eventos = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(eventos)"
+        ).fetchall()
+    }
+
+    if "recurrente_id" not in columnas_eventos:
+        cursor.execute("""
+            ALTER TABLE eventos
+            ADD COLUMN recurrente_id INTEGER
+        """)
+
+    if "fecha_ocurrencia" not in columnas_eventos:
+        cursor.execute("""
+            ALTER TABLE eventos
+            ADD COLUMN fecha_ocurrencia TEXT
+        """)
+
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_eventos_recurrentes_ocurrencia
+        ON eventos (
+            recurrente_id,
+            fecha_ocurrencia
+        )
+        WHERE recurrente_id IS NOT NULL
+          AND fecha_ocurrencia IS NOT NULL
+    """)
+
     conexion.commit()
     conexion.close()
 
@@ -729,6 +789,233 @@ def cancelar_recordatorio(
 
 
 # ==========================================================
+# MATERIALIZACIÓN DE EVENTOS RECURRENTES
+# ==========================================================
+
+DIAS_SEMANA_EVENTOS = {
+    "lunes": 0,
+    "martes": 1,
+    "miercoles": 2,
+    "jueves": 3,
+    "viernes": 4,
+    "sabado": 5,
+    "domingo": 6,
+}
+
+
+def obtener_eventos_recurrentes_activos():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos_recurrentes
+        WHERE estado = 'activo'
+        ORDER BY id ASC
+    """)
+
+    resultados = cursor.fetchall()
+    conexion.close()
+
+    return resultados
+
+
+def siguiente_fecha_evento_recurrente(
+    frecuencia,
+    dia_semana,
+    hora_inicio,
+    ahora
+):
+    hoy = ahora.date()
+
+    try:
+        hora_objetivo = datetime.strptime(
+            hora_inicio,
+            "%H:%M"
+        ).time()
+
+    except (TypeError, ValueError):
+        return None
+
+    if frecuencia == "diaria":
+        fecha_objetivo = hoy
+
+        if datetime.combine(
+            hoy,
+            hora_objetivo
+        ) < ahora:
+            fecha_objetivo = hoy + timedelta(days=1)
+
+        return fecha_objetivo
+
+    if frecuencia == "semanal":
+        objetivo = DIAS_SEMANA_EVENTOS.get(
+            dia_semana
+        )
+
+        if objetivo is None:
+            return None
+
+        dias_hasta = (
+            objetivo
+            - hoy.weekday()
+        ) % 7
+
+        fecha_objetivo = (
+            hoy
+            + timedelta(days=dias_hasta)
+        )
+
+        if (
+            dias_hasta == 0
+            and datetime.combine(
+                hoy,
+                hora_objetivo
+            ) < ahora
+        ):
+            fecha_objetivo = hoy + timedelta(days=7)
+
+        return fecha_objetivo
+
+    return None
+
+
+def materializar_proximos_eventos_recurrentes():
+    ahora = datetime.now()
+    recurrentes = obtener_eventos_recurrentes_activos()
+
+    creados = 0
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    for recurrente in recurrentes:
+        (
+            recurrente_id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            hora_fin,
+            estado,
+        ) = recurrente
+
+        fecha_objetivo = siguiente_fecha_evento_recurrente(
+            frecuencia,
+            dia_semana,
+            hora_inicio,
+            ahora
+        )
+
+        if fecha_objetivo is None:
+            continue
+
+        fecha_iso = fecha_objetivo.isoformat()
+
+        cursor.execute("""
+            SELECT
+                id,
+                estado
+            FROM eventos
+            WHERE recurrente_id = ?
+              AND fecha_ocurrencia = ?
+            LIMIT 1
+        """, (
+            recurrente_id,
+            fecha_iso,
+        ))
+
+        existente = cursor.fetchone()
+
+        if existente:
+            evento_id, estado_existente = existente
+
+            if estado_existente != "activo":
+                cursor.execute("""
+                    UPDATE eventos
+                    SET titulo = ?,
+                        descripcion = '',
+                        fecha = ?,
+                        hora_inicio = ?,
+                        hora_fin = ?,
+                        estado = 'activo',
+                        fecha_actualizacion = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (
+                    titulo,
+                    fecha_iso,
+                    hora_inicio,
+                    hora_fin,
+                    evento_id,
+                ))
+
+                creados += 1
+
+            else:
+                cursor.execute("""
+                    UPDATE eventos
+                    SET titulo = ?,
+                        hora_inicio = ?,
+                        hora_fin = ?,
+                        fecha_actualizacion = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (
+                    titulo,
+                    hora_inicio,
+                    hora_fin,
+                    evento_id,
+                ))
+
+            continue
+
+        try:
+            cursor.execute("""
+                INSERT INTO eventos (
+                    titulo,
+                    descripcion,
+                    fecha,
+                    hora_inicio,
+                    hora_fin,
+                    estado,
+                    recurrente_id,
+                    fecha_ocurrencia
+                )
+                VALUES (?, '', ?, ?, ?, 'activo', ?, ?)
+            """, (
+                titulo,
+                fecha_iso,
+                hora_inicio,
+                hora_fin,
+                recurrente_id,
+                fecha_iso,
+            ))
+
+            creados += 1
+
+        except sqlite3.IntegrityError:
+            continue
+
+    conexion.commit()
+    conexion.close()
+
+    if creados:
+        print(
+            f"🗓️ Materialicé {creados} "
+            f"{'ocurrencia recurrente' if creados == 1 else 'ocurrencias recurrentes'}.",
+            flush=True
+        )
+
+    return creados
+
+
+# ==========================================================
 # RUTINAS RECURRENTES
 # ==========================================================
 
@@ -1053,6 +1340,9 @@ def ejecutar_motor():
         "Rutinas recurrentes: activas."
     )
     print(
+        "Eventos recurrentes: materialización automática activa."
+    )
+    print(
         "Ctrl + C para detener."
     )
     print()
@@ -1060,6 +1350,7 @@ def ejecutar_motor():
     while True:
 
         try:
+            materializar_proximos_eventos_recurrentes()
             revisar_recordatorios()
             revisar_rutinas()
 
