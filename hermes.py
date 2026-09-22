@@ -1855,30 +1855,13 @@ def crear_evento_natural_desde_mensaje(
             "Ese momento ya pasó."
         )
 
-    evento_id = crear_evento(
+    return crear_evento_con_control_conflictos(
         titulo=titulo,
         fecha=fecha,
         hora_inicio=hora_inicio,
         hora_fin=hora_fin,
         descripcion="",
     )
-
-    respuesta = (
-        f"Listo. Agregué el evento "
-        f"#{evento_id}: {titulo} para "
-        f"{fecha_para_mostrar(fecha)} "
-        f"a las {hora_inicio}"
-    )
-
-    if hora_fin:
-        respuesta += (
-            f" hasta las {hora_fin}"
-        )
-
-    respuesta += "."
-
-    return respuesta
-
 
 
 # ==========================================================
@@ -1968,6 +1951,33 @@ def buscar_evento_desde_mensaje(
     mensaje
 ):
     eventos = obtener_eventos_activos()
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    # Si Leo menciona un ID explícito, ese ID manda.
+    coincidencia_id = re.search(
+        r"\b(?:evento\s*)?#\s*(\d+)\b",
+        texto
+    )
+
+    if not coincidencia_id:
+        coincidencia_id = re.search(
+            r"\bevento\s+(\d+)\b",
+            texto
+        )
+
+    if coincidencia_id:
+        evento_id = int(
+            coincidencia_id.group(1)
+        )
+
+        for evento in eventos:
+            if evento[0] == evento_id:
+                return evento
+
+        return None
 
     candidatos = []
 
@@ -5374,6 +5384,7 @@ def aplicar_modificacion_evento(
     fecha_nueva=None,
     hora_nueva=None,
     hora_fin_nueva=None,
+    omitir_control_conflictos=False,
 ):
     (
         evento_id,
@@ -5453,6 +5464,35 @@ def aplicar_modificacion_evento(
             return (
                 "La nueva fecha y hora "
                 "ya pasaron."
+            )
+
+    if (
+        not omitir_control_conflictos
+        and hora_final
+    ):
+        conflictos = buscar_conflictos_para_evento(
+            fecha=fecha_final,
+            hora_inicio=hora_final,
+            hora_fin=hora_fin_final,
+            excluir_evento_id=evento_id,
+        )
+
+        if conflictos:
+            global confirmacion_pendiente
+
+            confirmacion_pendiente = {
+                "tipo": "mover_evento_con_conflicto",
+                "evento": evento,
+                "fecha_nueva": fecha_final,
+                "hora_nueva": hora_final,
+                "hora_fin_nueva": hora_fin_final,
+                "conflictos": conflictos,
+            }
+
+            return (
+                "⚠️ Ese cambio se superpone con "
+                f"{describir_conflictos_para_aviso(conflictos)}. "
+                "¿Querés mover el evento igualmente?"
             )
 
     estado_modificacion, _ = modificar_evento(
@@ -5580,6 +5620,85 @@ def modificar_evento_desde_mensaje(
         fecha_nueva=fecha_nueva,
         hora_nueva=hora_nueva,
         hora_fin_nueva=hora_fin_nueva,
+    )
+
+
+def procesar_confirmacion_mover_evento_con_conflicto(
+    mensaje,
+    pendiente,
+):
+    global confirmacion_pendiente
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    negativas = (
+        "no",
+        "cancelalo",
+        "cancelala",
+        "cancela",
+        "dejalo",
+        "dejala",
+        "olvidalo",
+        "olvidala",
+        "no lo muevas",
+        "no la muevas",
+    )
+
+    afirmativas = (
+        "si",
+        "sí",
+        "dale",
+        "mover igual",
+        "movelo",
+        "movela",
+        "confirmo",
+        "hacelo",
+        "hazlo",
+        "igual",
+    )
+
+    if any(
+        expresion == texto
+        or expresion in texto
+        for expresion in negativas
+    ):
+        confirmacion_pendiente = None
+
+        return (
+            "Perfecto. Dejé el evento como estaba."
+        )
+
+    if any(
+        expresion == texto
+        or expresion in texto
+        for expresion in afirmativas
+    ):
+        evento = pendiente["evento"]
+
+        confirmacion_pendiente = None
+
+        respuesta = aplicar_modificacion_evento(
+            evento=evento,
+            fecha_nueva=pendiente["fecha_nueva"],
+            hora_nueva=pendiente["hora_nueva"],
+            hora_fin_nueva=pendiente["hora_fin_nueva"],
+            omitir_control_conflictos=True,
+        )
+
+        if respuesta.startswith(
+            "Listo."
+        ):
+            respuesta += (
+                " Quedó registrado con conflicto de agenda."
+            )
+
+        return respuesta
+
+    return (
+        "Ese cambio se superpone con otro compromiso. "
+        "Decime “sí” para moverlo igualmente o “no” para dejarlo como está."
     )
 
 
@@ -5714,6 +5833,20 @@ def procesar_confirmacion_pendiente(
     tipo = pendiente.get(
         "tipo"
     )
+
+    if tipo == "crear_evento_con_conflicto":
+
+        return procesar_confirmacion_crear_evento_con_conflicto(
+            mensaje,
+            pendiente,
+        )
+
+    if tipo == "mover_evento_con_conflicto":
+
+        return procesar_confirmacion_mover_evento_con_conflicto(
+            mensaje,
+            pendiente,
+        )
 
     if tipo == "nuevo_aviso_evento":
 
@@ -8080,6 +8213,680 @@ def mostrar_vencimientos_manana():
     )
 
 
+
+# ==========================================================
+# CONFLICTOS DE AGENDA
+# ==========================================================
+
+def es_auditoria_conflictos_agenda(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_conflictos = any(
+        expresion in texto
+        for expresion in (
+            "conflictos de agenda",
+            "conflictos en la agenda",
+            "agenda",
+        )
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "audita",
+            "auditar",
+            "revisa a fondo",
+            "revisar a fondo",
+            "verifica conflictos",
+            "verificar conflictos",
+            "auditoria de agenda",
+            "auditoría de agenda",
+        )
+    )
+
+    return (
+        menciona_conflictos
+        and accion
+    )
+
+
+def auditar_conflictos_agenda():
+    eventos = obtener_eventos_activos()
+
+    problemas = []
+    duplicados = []
+    claves_vistas = {}
+
+    for evento in eventos:
+        evento_id = evento[0]
+        titulo = evento[1]
+        fecha = evento[3]
+        hora_inicio = evento[4]
+        hora_fin = evento[5]
+
+        try:
+            date.fromisoformat(
+                fecha
+            )
+
+        except (TypeError, ValueError):
+            problemas.append(
+                f"#{evento_id} {titulo}: fecha inválida ({fecha})."
+            )
+            continue
+
+        if not hora_inicio:
+            problemas.append(
+                f"#{evento_id} {titulo}: no tiene hora de inicio."
+            )
+            continue
+
+        try:
+            datetime.strptime(
+                hora_inicio,
+                "%H:%M"
+            )
+
+        except (TypeError, ValueError):
+            problemas.append(
+                f"#{evento_id} {titulo}: hora de inicio inválida ({hora_inicio})."
+            )
+            continue
+
+        if hora_fin:
+            try:
+                datetime.strptime(
+                    hora_fin,
+                    "%H:%M"
+                )
+
+            except (TypeError, ValueError):
+                problemas.append(
+                    f"#{evento_id} {titulo}: hora de fin inválida ({hora_fin})."
+                )
+
+        clave = (
+            normalizar_texto(
+                titulo
+            ),
+            fecha,
+            hora_inicio,
+            hora_fin or "",
+        )
+
+        if clave in claves_vistas:
+            duplicados.append(
+                (
+                    claves_vistas[clave],
+                    evento,
+                )
+            )
+        else:
+            claves_vistas[
+                clave
+            ] = evento
+
+    conflictos = detectar_conflictos_agenda()
+
+    return {
+        "eventos_revisados": len(eventos),
+        "problemas": problemas,
+        "duplicados": duplicados,
+        "conflictos": conflictos,
+    }
+
+
+def mostrar_auditoria_conflictos_agenda():
+    resultado = auditar_conflictos_agenda()
+
+    problemas = resultado[
+        "problemas"
+    ]
+    duplicados = resultado[
+        "duplicados"
+    ]
+    conflictos = resultado[
+        "conflictos"
+    ]
+
+    if (
+        not problemas
+        and not duplicados
+        and not conflictos
+    ):
+        return (
+            "La agenda está correcta. "
+            f"Revisé {resultado['eventos_revisados']} eventos activos "
+            "y no encontré horarios inválidos, duplicados exactos "
+            "ni conflictos próximos."
+        )
+
+    lineas = [
+        (
+            "Auditoría de agenda:"
+        ),
+        (
+            f"- Eventos activos revisados: "
+            f"{resultado['eventos_revisados']}"
+        ),
+        (
+            f"- Problemas de datos: "
+            f"{len(problemas)}"
+        ),
+        (
+            f"- Duplicados exactos: "
+            f"{len(duplicados)}"
+        ),
+        (
+            f"- Conflictos próximos: "
+            f"{len(conflictos)}"
+        ),
+    ]
+
+    if problemas:
+        lineas.append("")
+        lineas.append(
+            "Problemas de datos:"
+        )
+
+        for problema in problemas:
+            lineas.append(
+                f"- {problema}"
+            )
+
+    if duplicados:
+        lineas.append("")
+        lineas.append(
+            "Duplicados exactos:"
+        )
+
+        for evento_a, evento_b in duplicados:
+            lineas.append(
+                f"- #{evento_a[0]} {evento_a[1]} "
+                f"y #{evento_b[0]} {evento_b[1]} "
+                f"— {fecha_para_mostrar(evento_a[3])} "
+                f"{evento_a[4]}"
+            )
+
+    if conflictos:
+        lineas.append("")
+        lineas.append(
+            "Conflictos:"
+        )
+
+        for evento_a, evento_b in conflictos:
+            lineas.append(
+                f"- {describir_evento_conflicto(evento_a)} "
+                f"se superpone con "
+                f"{describir_evento_conflicto(evento_b)}"
+            )
+
+    lineas.append("")
+    lineas.append(
+        "La auditoría no elimina ni modifica eventos automáticamente."
+    )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def es_consulta_conflictos_agenda(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    expresiones = (
+        "tengo conflictos en la agenda",
+        "hay conflictos en la agenda",
+        "revisa conflictos de agenda",
+        "revisar conflictos de agenda",
+        "busca conflictos en la agenda",
+        "buscar conflictos en la agenda",
+        "eventos superpuestos",
+        "eventos solapados",
+        "eventos que se pisan",
+        "se pisan mis eventos",
+    )
+
+    return any(
+        expresion in texto
+        for expresion in expresiones
+    )
+
+
+def intervalo_evento_para_conflictos(
+    evento
+):
+    fecha = evento[3]
+    hora_inicio = evento[4]
+    hora_fin = evento[5]
+
+    if not fecha or not hora_inicio:
+        return None
+
+    try:
+        inicio = datetime.fromisoformat(
+            f"{fecha}T{hora_inicio}:00"
+        )
+
+    except ValueError:
+        return None
+
+    if not hora_fin:
+        return (
+            inicio,
+            None,
+        )
+
+    try:
+        fin = datetime.fromisoformat(
+            f"{fecha}T{hora_fin}:00"
+        )
+
+    except ValueError:
+        return (
+            inicio,
+            None,
+        )
+
+    if fin < inicio:
+        fin += timedelta(
+            days=1
+        )
+
+    return (
+        inicio,
+        fin,
+    )
+
+
+def eventos_se_superponen(
+    evento_a,
+    evento_b
+):
+    intervalo_a = intervalo_evento_para_conflictos(
+        evento_a
+    )
+
+    intervalo_b = intervalo_evento_para_conflictos(
+        evento_b
+    )
+
+    if not intervalo_a or not intervalo_b:
+        return False
+
+    inicio_a, fin_a = intervalo_a
+    inicio_b, fin_b = intervalo_b
+
+    # Si ninguno tiene hora de fin, solo consideramos
+    # conflicto si comienzan exactamente al mismo tiempo.
+    if fin_a is None and fin_b is None:
+        return inicio_a == inicio_b
+
+    # Si uno no tiene hora de fin, lo tratamos como un punto
+    # de agenda y comprobamos si cae dentro del otro intervalo.
+    if fin_a is None:
+        return (
+            inicio_b <= inicio_a
+            and (
+                fin_b is None
+                or inicio_a < fin_b
+            )
+        )
+
+    if fin_b is None:
+        return (
+            inicio_a <= inicio_b
+            and inicio_b < fin_a
+        )
+
+    # Dos eventos con rango se pisan si uno empieza antes de
+    # que termine el otro y viceversa. Tocar justo en el límite
+    # (por ejemplo 10:00-11:00 y 11:00-12:00) no es conflicto.
+    return (
+        inicio_a < fin_b
+        and inicio_b < fin_a
+    )
+
+
+def buscar_conflictos_para_evento(
+    fecha,
+    hora_inicio,
+    hora_fin=None,
+    excluir_evento_id=None,
+):
+    if not fecha or not hora_inicio:
+        return []
+
+    candidato = (
+        -1,
+        "Evento candidato",
+        "",
+        fecha,
+        hora_inicio,
+        hora_fin,
+        "activo",
+    )
+
+    conflictos = []
+
+    for evento in obtener_eventos_por_fecha(
+        fecha
+    ):
+        if (
+            excluir_evento_id is not None
+            and evento[0] == excluir_evento_id
+        ):
+            continue
+
+        if eventos_se_superponen(
+            candidato,
+            evento
+        ):
+            conflictos.append(
+                evento
+            )
+
+    return conflictos
+
+
+def describir_conflictos_para_aviso(
+    conflictos
+):
+    if not conflictos:
+        return ""
+
+    partes = []
+
+    for evento in conflictos:
+        texto = (
+            f"#{evento[0]} {evento[1]}"
+        )
+
+        if evento[4]:
+            texto += (
+                f" de {evento[4]}"
+            )
+
+        if evento[5]:
+            texto += (
+                f" a {evento[5]}"
+            )
+
+        partes.append(
+            texto
+        )
+
+    return "; ".join(
+        partes
+    )
+
+
+def crear_evento_con_control_conflictos(
+    titulo,
+    fecha,
+    hora_inicio,
+    hora_fin=None,
+    descripcion="",
+):
+    global confirmacion_pendiente
+
+    conflictos = buscar_conflictos_para_evento(
+        fecha=fecha,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+    )
+
+    if conflictos:
+        confirmacion_pendiente = {
+            "tipo": "crear_evento_con_conflicto",
+            "titulo": titulo,
+            "fecha": fecha,
+            "hora_inicio": hora_inicio,
+            "hora_fin": hora_fin,
+            "descripcion": descripcion,
+            "conflictos": conflictos,
+        }
+
+        return (
+            "⚠️ Ese horario se superpone con "
+            f"{describir_conflictos_para_aviso(conflictos)}. "
+            "¿Querés crear el evento igualmente?"
+        )
+
+    evento_id = crear_evento(
+        titulo=titulo,
+        fecha=fecha,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+        descripcion=descripcion,
+    )
+
+    respuesta = (
+        f"Listo. Agregué el evento "
+        f"#{evento_id}: {titulo} para "
+        f"{fecha_para_mostrar(fecha)}"
+    )
+
+    if hora_inicio:
+        respuesta += (
+            f" a las {hora_inicio}"
+        )
+
+    if hora_fin:
+        respuesta += (
+            f" hasta las {hora_fin}"
+        )
+
+    respuesta += "."
+
+    return respuesta
+
+
+def procesar_confirmacion_crear_evento_con_conflicto(
+    mensaje,
+    pendiente,
+):
+    global confirmacion_pendiente
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    afirmativas = (
+        "si",
+        "sí",
+        "dale",
+        "crealo",
+        "creala",
+        "crear igual",
+        "igual",
+        "confirmo",
+        "hacelo",
+        "hazlo",
+    )
+
+    negativas = (
+        "no",
+        "cancelalo",
+        "cancelala",
+        "cancela",
+        "dejalo",
+        "dejala",
+        "olvidalo",
+        "olvidala",
+        "no lo crees",
+        "no la crees",
+    )
+
+    if any(
+        expresion == texto
+        or expresion in texto
+        for expresion in negativas
+    ):
+        confirmacion_pendiente = None
+
+        return (
+            "Perfecto. No creé el evento."
+        )
+
+    if any(
+        expresion == texto
+        or expresion in texto
+        for expresion in afirmativas
+    ):
+        evento_id = crear_evento(
+            titulo=pendiente["titulo"],
+            fecha=pendiente["fecha"],
+            hora_inicio=pendiente["hora_inicio"],
+            hora_fin=pendiente["hora_fin"],
+            descripcion=pendiente["descripcion"],
+        )
+
+        confirmacion_pendiente = None
+
+        respuesta = (
+            f"Listo. Agregué igualmente el evento "
+            f"#{evento_id}: {pendiente['titulo']} para "
+            f"{fecha_para_mostrar(pendiente['fecha'])} "
+            f"a las {pendiente['hora_inicio']}"
+        )
+
+        if pendiente["hora_fin"]:
+            respuesta += (
+                f" hasta las {pendiente['hora_fin']}"
+            )
+
+        respuesta += (
+            ". Quedó registrado con conflicto de agenda."
+        )
+
+        return respuesta
+
+    return (
+        "Ese evento se superpone con otro compromiso. "
+        "Decime “sí” para crearlo igualmente o “no” para cancelarlo."
+    )
+
+
+def detectar_conflictos_agenda():
+    eventos = obtener_eventos_activos()
+
+    ahora = datetime.now()
+
+    futuros = []
+
+    for evento in eventos:
+        intervalo = intervalo_evento_para_conflictos(
+            evento
+        )
+
+        if not intervalo:
+            continue
+
+        inicio, fin = intervalo
+
+        referencia_fin = (
+            fin
+            if fin is not None
+            else inicio
+        )
+
+        if referencia_fin < ahora:
+            continue
+
+        futuros.append(
+            evento
+        )
+
+    conflictos = []
+
+    for indice, evento_a in enumerate(
+        futuros
+    ):
+
+        for evento_b in futuros[
+            indice + 1:
+        ]:
+
+            if eventos_se_superponen(
+                evento_a,
+                evento_b
+            ):
+                conflictos.append(
+                    (
+                        evento_a,
+                        evento_b,
+                    )
+                )
+
+    return conflictos
+
+
+def describir_evento_conflicto(
+    evento
+):
+    texto = (
+        f"#{evento[0]} {evento[1]} "
+        f"— {fecha_para_mostrar(evento[3])}"
+    )
+
+    if evento[4]:
+        texto += (
+            f" — {evento[4]}"
+        )
+
+    if evento[5]:
+        texto += (
+            f" a {evento[5]}"
+        )
+
+    return texto
+
+
+def mostrar_conflictos_agenda():
+    conflictos = detectar_conflictos_agenda()
+
+    if not conflictos:
+        return (
+            "No encontré conflictos entre tus "
+            "eventos próximos."
+        )
+
+    lineas = [
+        (
+            f"Encontré {len(conflictos)} "
+            f"{'conflicto' if len(conflictos) == 1 else 'conflictos'} "
+            "en tu agenda:"
+        )
+    ]
+
+    for indice, (
+        evento_a,
+        evento_b,
+    ) in enumerate(
+        conflictos,
+        start=1
+    ):
+        lineas.append(
+            f"{indice}. "
+            f"{describir_evento_conflicto(evento_a)} "
+            f"se superpone con "
+            f"{describir_evento_conflicto(evento_b)}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
 # ==========================================================
 # EVENTOS / AGENDA
 # ==========================================================
@@ -9958,6 +10765,24 @@ def procesar_comandos_directos(
 
         return generar_resumen_diario()
 
+    if es_auditoria_conflictos_agenda(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return mostrar_auditoria_conflictos_agenda()
+
+    if es_consulta_conflictos_agenda(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return mostrar_conflictos_agenda()
+
     # Las órdenes completas de prioridad + fecha deben resolverse
     # antes que la edición contextual. Palabras como "pasala"
     # también aparecen en órdenes completas y no deben confundirse
@@ -10935,28 +11760,20 @@ No escribas nada fuera del JSON.
 
         elif titulo:
 
-            evento_id = crear_evento(
-                titulo=titulo,
-                fecha=fecha,
-                hora_inicio=hora_inicio,
-                hora_fin=hora_fin,
-                descripcion=descripcion,
-            )
-
-            respuesta = (
-                f"Listo. Agregué el evento "
-                f"#{evento_id}: "
-                f"{titulo} para "
-                f"{fecha_para_mostrar(fecha)}"
-            )
-
-            if hora_inicio:
-
-                respuesta += (
-                    f" a las {hora_inicio}"
+            if not hora_inicio:
+                respuesta = (
+                    "Necesito una hora "
+                    "para crear el evento."
                 )
 
-            respuesta += "."
+            else:
+                respuesta = crear_evento_con_control_conflictos(
+                    titulo=titulo,
+                    fecha=fecha,
+                    hora_inicio=hora_inicio,
+                    hora_fin=hora_fin,
+                    descripcion=descripcion,
+                )
 
     if resultado.get(
         "guardar_memoria"
@@ -11069,6 +11886,10 @@ if hora_resumen_nocturno_configurada:
     )
 
 print("🧪 Auditoría y control antidupl. del resumen nocturno: activos")
+print("⚠️ Detección de conflictos de agenda: activa")
+print("🛑 Advertencia de conflictos al crear eventos: activa")
+print("↔️ Advertencia de conflictos al mover eventos: activa")
+print("🧪 Auditoría avanzada de conflictos de agenda: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()
