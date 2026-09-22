@@ -82,6 +82,26 @@ def crear_tabla_recordatorios():
     """)
 
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS configuracion_resumen_nocturno (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            activo INTEGER NOT NULL DEFAULT 1,
+            hora TEXT NOT NULL DEFAULT '21:00',
+            ultimo_envio TEXT,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO configuracion_resumen_nocturno (
+            id,
+            activo,
+            hora,
+            ultimo_envio
+        )
+        VALUES (1, 1, '21:00', NULL)
+    """)
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS rutinas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             titulo TEXT NOT NULL,
@@ -1288,6 +1308,7 @@ def enviar_notificacion(
     )
 
 
+
 # ==========================================================
 # RESUMEN DIARIO AUTOMÁTICO
 # ==========================================================
@@ -2003,7 +2024,6 @@ def revisar_resumen_diario():
 
     return True
 
-
 def probar_resumen_diario():
     resumen = generar_resumen_diario_motor()
 
@@ -2022,6 +2042,791 @@ def probar_resumen_diario():
     print()
     print(
         "La prueba no marca el resumen de hoy como enviado."
+    )
+    print()
+
+
+
+# ==========================================================
+# RESUMEN NOCTURNO AUTOMÁTICO
+# ==========================================================
+
+def obtener_configuracion_resumen_nocturno():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            activo,
+            hora,
+            ultimo_envio
+        FROM configuracion_resumen_nocturno
+        WHERE id = 1
+        LIMIT 1
+    """)
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
+def configurar_hora_resumen_nocturno(
+    nueva_hora
+):
+    try:
+        hora_validada = datetime.strptime(
+            nueva_hora,
+            "%H:%M"
+        ).strftime(
+            "%H:%M"
+        )
+
+    except (TypeError, ValueError):
+        return (
+            "hora_invalida",
+            None
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE configuracion_resumen_nocturno
+        SET hora = ?,
+            activo = 1,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = 1
+    """, (
+        hora_validada,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizada",
+        hora_validada
+    )
+
+
+def obtener_hora_resumen_nocturno():
+    configuracion = obtener_configuracion_resumen_nocturno()
+
+    if not configuracion:
+        return None
+
+    return configuracion[1]
+
+
+def auditar_configuracion_resumen_nocturno():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            activo,
+            hora,
+            ultimo_envio
+        FROM configuracion_resumen_nocturno
+        WHERE id = 1
+        LIMIT 1
+    """)
+
+    fila = cursor.fetchone()
+
+    if not fila:
+        cursor.execute("""
+            INSERT INTO configuracion_resumen_nocturno (
+                id,
+                activo,
+                hora,
+                ultimo_envio
+            )
+            VALUES (1, 1, '21:00', NULL)
+        """)
+
+        conexion.commit()
+        conexion.close()
+
+        return {
+            "estado": "corregido",
+            "correcciones": [
+                "La configuración nocturna no existía y fue recreada con 21:00."
+            ],
+        }
+
+    activo, hora, ultimo_envio = fila
+    correcciones = []
+
+    if activo not in (0, 1):
+        cursor.execute("""
+            UPDATE configuracion_resumen_nocturno
+            SET activo = 0,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = 1
+        """)
+
+        activo = 0
+        correcciones.append(
+            "El estado era inválido y el resumen nocturno fue desactivado por seguridad."
+        )
+
+    hora_valida = True
+
+    try:
+        datetime.strptime(
+            hora,
+            "%H:%M"
+        )
+
+    except (TypeError, ValueError):
+        hora_valida = False
+
+    if not hora_valida:
+        cursor.execute("""
+            UPDATE configuracion_resumen_nocturno
+            SET hora = '21:00',
+                activo = 0,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = 1
+        """)
+
+        hora = "21:00"
+        activo = 0
+        correcciones.append(
+            "La hora nocturna era inválida; la restablecí a 21:00 y desactivé el envío automático."
+        )
+
+    if ultimo_envio:
+        ultimo_valido = True
+
+        try:
+            fecha_ultimo = datetime.strptime(
+                ultimo_envio,
+                "%Y-%m-%d"
+            ).date()
+
+        except (TypeError, ValueError):
+            ultimo_valido = False
+            fecha_ultimo = None
+
+        if (
+            not ultimo_valido
+            or (
+                fecha_ultimo is not None
+                and fecha_ultimo > datetime.now().date()
+            )
+        ):
+            cursor.execute("""
+                UPDATE configuracion_resumen_nocturno
+                SET ultimo_envio = NULL,
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """)
+
+            ultimo_envio = None
+            correcciones.append(
+                "El último envío nocturno registrado era inválido y fue limpiado."
+            )
+
+    conexion.commit()
+    conexion.close()
+
+    return {
+        "estado": (
+            "corregido"
+            if correcciones
+            else "correcto"
+        ),
+        "activo": activo,
+        "hora": hora,
+        "ultimo_envio": ultimo_envio,
+        "correcciones": correcciones,
+    }
+
+
+def reclamar_envio_resumen_nocturno(
+    ahora
+):
+    hoy_iso = ahora.date().isoformat()
+
+    conexion = conectar()
+
+    try:
+        conexion.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            SELECT
+                activo,
+                hora,
+                ultimo_envio
+            FROM configuracion_resumen_nocturno
+            WHERE id = 1
+            LIMIT 1
+        """)
+
+        configuracion = cursor.fetchone()
+
+        if not configuracion:
+            conexion.rollback()
+            return False
+
+        activo, hora, ultimo_envio = configuracion
+
+        if not activo:
+            conexion.rollback()
+            return False
+
+        if not resumen_nocturno_debe_enviarse(
+            ahora,
+            hora,
+            ultimo_envio
+        ):
+            conexion.rollback()
+            return False
+
+        cursor.execute("""
+            UPDATE configuracion_resumen_nocturno
+            SET ultimo_envio = ?,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = 1
+              AND (
+                    ultimo_envio IS NULL
+                    OR ultimo_envio != ?
+              )
+        """, (
+            hoy_iso,
+            hoy_iso,
+        ))
+
+        reclamado = (
+            cursor.rowcount == 1
+        )
+
+        if reclamado:
+            conexion.commit()
+        else:
+            conexion.rollback()
+
+        return reclamado
+
+    finally:
+        conexion.close()
+
+
+def marcar_resumen_nocturno_enviado(
+    fecha_iso
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE configuracion_resumen_nocturno
+        SET ultimo_envio = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = 1
+    """, (
+        fecha_iso,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+
+def obtener_datos_resumen_nocturno():
+    ahora = datetime.now()
+    hoy = ahora.date()
+    manana = hoy + timedelta(days=1)
+
+    hoy_iso = hoy.isoformat()
+    manana_iso = manana.isoformat()
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            fecha,
+            prioridad
+        FROM tareas
+        WHERE estado = 'pendiente'
+        ORDER BY
+            CASE
+                WHEN fecha IS NULL THEN 1
+                ELSE 0
+            END,
+            fecha ASC,
+            CASE prioridad
+                WHEN 'alta' THEN 0
+                WHEN 'media' THEN 1
+                WHEN 'baja' THEN 2
+                ELSE 1
+            END,
+            id ASC
+    """)
+
+    tareas_pendientes = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            fecha,
+            prioridad
+        FROM tareas
+        WHERE estado = 'completada'
+          AND date(fecha_actualizacion) = ?
+        ORDER BY
+            CASE prioridad
+                WHEN 'alta' THEN 0
+                WHEN 'media' THEN 1
+                WHEN 'baja' THEN 2
+                ELSE 1
+            END,
+            id ASC
+    """, (
+        hoy_iso,
+    ))
+
+    tareas_completadas = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            fecha,
+            hora_inicio,
+            hora_fin
+        FROM eventos
+        WHERE estado = 'activo'
+          AND fecha = ?
+        ORDER BY
+            CASE
+                WHEN hora_inicio IS NULL THEN 1
+                ELSE 0
+            END,
+            hora_inicio ASC,
+            id ASC
+    """, (
+        hoy_iso,
+    ))
+
+    eventos_hoy = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            fecha,
+            hora_inicio,
+            hora_fin
+        FROM eventos
+        WHERE estado = 'activo'
+          AND fecha = ?
+        ORDER BY
+            CASE
+                WHEN hora_inicio IS NULL THEN 1
+                ELSE 0
+            END,
+            hora_inicio ASC,
+            id ASC
+    """, (
+        manana_iso,
+    ))
+
+    eventos_manana = cursor.fetchall()
+
+    conexion.close()
+
+    tareas_atrasadas = []
+    tareas_manana = []
+
+    for tarea in tareas_pendientes:
+        fecha = tarea[2]
+
+        if not fecha:
+            continue
+
+        try:
+            fecha_obj = datetime.strptime(
+                fecha,
+                "%Y-%m-%d"
+            ).date()
+
+        except (TypeError, ValueError):
+            continue
+
+        if fecha_obj < hoy:
+            tareas_atrasadas.append(
+                tarea
+            )
+
+        elif fecha_obj == manana:
+            tareas_manana.append(
+                tarea
+            )
+
+    return {
+        "ahora": ahora,
+        "hoy": hoy,
+        "manana": manana,
+        "tareas_pendientes": tareas_pendientes,
+        "tareas_completadas": tareas_completadas,
+        "tareas_atrasadas": tareas_atrasadas,
+        "tareas_manana": tareas_manana,
+        "eventos_hoy": eventos_hoy,
+        "eventos_manana": eventos_manana,
+    }
+
+
+def clave_urgencia_nocturna(
+    tarea,
+    hoy
+):
+    fecha = tarea[2]
+
+    if fecha:
+        try:
+            fecha_obj = datetime.strptime(
+                fecha,
+                "%Y-%m-%d"
+            ).date()
+
+        except (TypeError, ValueError):
+            fecha_obj = None
+
+        if fecha_obj is not None:
+
+            if fecha_obj < hoy:
+                grupo = 0
+
+            elif fecha_obj == hoy:
+                grupo = 1
+
+            else:
+                grupo = 2
+
+            prioridad = {
+                "alta": 0,
+                "media": 1,
+                "baja": 2,
+            }.get(
+                tarea[3] or "media",
+                1
+            )
+
+            return (
+                grupo,
+                fecha_obj,
+                prioridad,
+                tarea[0],
+            )
+
+    prioridad = {
+        "alta": 0,
+        "media": 1,
+        "baja": 2,
+    }.get(
+        tarea[3] or "media",
+        1
+    )
+
+    return (
+        3,
+        datetime.max.date(),
+        prioridad,
+        tarea[0],
+    )
+
+
+def generar_resumen_nocturno_motor():
+    datos = obtener_datos_resumen_nocturno()
+
+    hoy = datos["hoy"]
+    completadas = datos[
+        "tareas_completadas"
+    ]
+    atrasadas = datos[
+        "tareas_atrasadas"
+    ]
+    tareas_manana = datos[
+        "tareas_manana"
+    ]
+    eventos_hoy = datos[
+        "eventos_hoy"
+    ]
+    eventos_manana = datos[
+        "eventos_manana"
+    ]
+    pendientes = datos[
+        "tareas_pendientes"
+    ]
+
+    lineas = [
+        (
+            f"Resumen nocturno — "
+            f"{hoy.strftime('%d/%m/%Y')}"
+        ),
+        (
+            f"{len(completadas)} tareas completadas hoy, "
+            f"{len(atrasadas)} atrasadas."
+        ),
+    ]
+
+    if completadas:
+        lineas.append(
+            "Completado hoy:"
+        )
+
+        for tarea in completadas:
+            lineas.append(
+                f"- {tarea[1]}"
+            )
+
+    if atrasadas:
+        lineas.append(
+            "Pendientes atrasados:"
+        )
+
+        for tarea in sorted(
+            atrasadas,
+            key=lambda elemento: clave_urgencia_nocturna(
+                elemento,
+                hoy
+            )
+        ):
+            prioridad = (
+                tarea[3]
+                if tarea[3]
+                else "media"
+            )
+
+            lineas.append(
+                f"- {tarea[1]} ({prioridad})"
+            )
+
+    if eventos_hoy:
+        lineas.append(
+            "Eventos de hoy:"
+        )
+
+        for evento in eventos_hoy:
+            texto = (
+                f"- {evento[1]}"
+            )
+
+            if evento[3]:
+                texto += (
+                    f" {evento[3]}"
+                )
+
+            if evento[4]:
+                texto += (
+                    f"-{evento[4]}"
+                )
+
+            lineas.append(
+                texto
+            )
+
+    lineas.append(
+        "Mañana:"
+    )
+
+    if tareas_manana:
+
+        for tarea in sorted(
+            tareas_manana,
+            key=lambda elemento: clave_urgencia_nocturna(
+                elemento,
+                hoy
+            )
+        ):
+            prioridad = (
+                tarea[3]
+                if tarea[3]
+                else "media"
+            )
+
+            lineas.append(
+                f"- Tarea: {tarea[1]} ({prioridad})"
+            )
+
+    else:
+        lineas.append(
+            "- Sin tareas con vencimiento mañana."
+        )
+
+    if eventos_manana:
+
+        for evento in eventos_manana:
+            texto = (
+                f"- Evento: {evento[1]}"
+            )
+
+            if evento[3]:
+                texto += (
+                    f" {evento[3]}"
+                )
+
+            if evento[4]:
+                texto += (
+                    f"-{evento[4]}"
+                )
+
+            lineas.append(
+                texto
+            )
+
+    else:
+        lineas.append(
+            "- Sin eventos mañana."
+        )
+
+    if pendientes:
+        foco = sorted(
+            pendientes,
+            key=lambda elemento: clave_urgencia_nocturna(
+                elemento,
+                hoy
+            )
+        )[0]
+
+        lineas.append(
+            f"Foco para mañana: {foco[1]}."
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def generar_texto_notificacion_nocturna():
+    datos = obtener_datos_resumen_nocturno()
+
+    hoy = datos["hoy"]
+    completadas = datos["tareas_completadas"]
+    atrasadas = datos["tareas_atrasadas"]
+    manana_tareas = datos["tareas_manana"]
+    manana_eventos = datos["eventos_manana"]
+    pendientes = datos["tareas_pendientes"]
+
+    partes = [
+        f"{len(completadas)} completadas",
+        f"{len(atrasadas)} atrasadas",
+        (
+            f"mañana: {len(manana_tareas)} tareas, "
+            f"{len(manana_eventos)} eventos"
+        ),
+    ]
+
+    if pendientes:
+        foco = sorted(
+            pendientes,
+            key=lambda elemento: clave_urgencia_nocturna(
+                elemento,
+                hoy
+            )
+        )[0]
+
+        partes.append(
+            f"Foco: {foco[1]}"
+        )
+
+    return " • ".join(
+        partes
+    )
+
+
+def resumen_nocturno_debe_enviarse(
+    ahora,
+    hora_configurada,
+    ultimo_envio
+):
+    if ultimo_envio == ahora.date().isoformat():
+        return False
+
+    try:
+        hora_objetivo = datetime.strptime(
+            hora_configurada,
+            "%H:%M"
+        ).time()
+
+    except (TypeError, ValueError):
+        return False
+
+    objetivo = datetime.combine(
+        ahora.date(),
+        hora_objetivo
+    )
+
+    fin_del_dia = datetime.combine(
+        ahora.date(),
+        datetime.max.time()
+    )
+
+    return (
+        objetivo <= ahora <= fin_del_dia
+    )
+
+
+def revisar_resumen_nocturno():
+    ahora = datetime.now()
+
+    if not reclamar_envio_resumen_nocturno(
+        ahora
+    ):
+        return False
+
+    resumen = generar_resumen_nocturno_motor()
+    texto_notificacion = (
+        generar_texto_notificacion_nocturna()
+    )
+
+    enviar_notificacion(
+        "Resumen nocturno",
+        texto_notificacion
+    )
+
+    print()
+    print(
+        "🌙 RESUMEN NOCTURNO AUTOMÁTICO"
+    )
+    print(
+        resumen,
+        flush=True
+    )
+    print()
+
+    return True
+
+def probar_resumen_nocturno():
+    resumen = generar_resumen_nocturno_motor()
+
+    enviar_notificacion(
+        "Prueba de resumen nocturno",
+        generar_texto_notificacion_nocturna()
+    )
+
+    print()
+    print(
+        "🌙 PRUEBA DE RESUMEN NOCTURNO"
+    )
+    print(
+        resumen
+    )
+    print()
+    print(
+        "La prueba no marca el resumen nocturno "
+        "de hoy como enviado."
     )
     print()
 
@@ -2115,6 +2920,22 @@ def ejecutar_motor():
             f"{estado_resumen} a las "
             f"{configuracion_resumen[1]}."
         )
+
+    configuracion_nocturna = obtener_configuracion_resumen_nocturno()
+
+    if configuracion_nocturna:
+        estado_nocturno = (
+            "activo"
+            if configuracion_nocturna[0]
+            else "desactivado"
+        )
+
+        print(
+            f"Resumen nocturno automático: "
+            f"{estado_nocturno} a las "
+            f"{configuracion_nocturna[1]}."
+        )
+
     print(
         "Ctrl + C para detener."
     )
@@ -2125,6 +2946,7 @@ def ejecutar_motor():
         try:
             materializar_proximos_eventos_recurrentes()
             revisar_resumen_diario()
+            revisar_resumen_nocturno()
             revisar_recordatorios()
             revisar_rutinas()
 
@@ -2137,7 +2959,7 @@ def ejecutar_motor():
             print(
                 "Motor de recordatorios detenido."
             )
-            break
+            break 
 
 
 if __name__ == "__main__":
@@ -2146,11 +2968,22 @@ if __name__ == "__main__":
     if "--probar-resumen" in sys.argv:
         probar_resumen_diario()
 
+    elif "--probar-resumen-nocturno" in sys.argv:
+        probar_resumen_nocturno()
+
     elif "--auditar-resumen" in sys.argv:
         resultado = auditar_configuracion_resumen_diario()
 
         print()
         print("🧪 AUDITORÍA DEL RESUMEN DIARIO")
+        print(resultado)
+        print()
+
+    elif "--auditar-resumen-nocturno" in sys.argv:
+        resultado = auditar_configuracion_resumen_nocturno()
+
+        print()
+        print("🧪 AUDITORÍA DEL RESUMEN NOCTURNO")
         print(resultado)
         print()
 

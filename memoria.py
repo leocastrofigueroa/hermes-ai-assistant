@@ -409,6 +409,42 @@ def obtener_tareas_entre_fechas(
     return resultados
 
 
+def obtener_tareas_completadas_en_fecha(
+    fecha
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            descripcion,
+            fecha,
+            estado,
+            prioridad
+        FROM tareas
+        WHERE estado = 'completada'
+          AND date(fecha_actualizacion) = ?
+        ORDER BY
+            CASE prioridad
+                WHEN 'alta' THEN 0
+                WHEN 'media' THEN 1
+                WHEN 'baja' THEN 2
+                ELSE 1
+            END,
+            id ASC
+    """, (
+        fecha,
+    ))
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
 def obtener_tarea_por_id(
     tarea_id
 ):

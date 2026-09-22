@@ -13,6 +13,7 @@ from memoria import (
     obtener_tareas_pendientes,
     obtener_tareas_por_fecha,
     obtener_tareas_entre_fechas,
+    obtener_tareas_completadas_en_fecha,
     completar_tarea,
     obtener_tarea_por_id,
     modificar_tarea,
@@ -58,6 +59,10 @@ from recordatorios import (
     configurar_hora_resumen_diario,
     obtener_hora_resumen_diario,
     auditar_configuracion_resumen_diario,
+    obtener_configuracion_resumen_nocturno,
+    configurar_hora_resumen_nocturno,
+    obtener_hora_resumen_nocturno,
+    auditar_configuracion_resumen_nocturno,
 )
 
 
@@ -532,9 +537,11 @@ def autoriza_creacion_evento_desde_modelo(
     )
 
 
+
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — DESPLAZAMIENTOS RELATIVOS
 # ==========================================================
+
 NUMEROS_TEMPORALES = {
     "un": 1,
     "una": 1,
@@ -694,6 +701,7 @@ def extraer_hora_relativa_avanzada(
     )
 
 
+
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — DÍAS NATURALES
 # ==========================================================
@@ -838,6 +846,7 @@ def extraer_fecha_natural_avanzada(
             )
 
     return None
+
 
 
 # ==========================================================
@@ -1220,9 +1229,11 @@ def fecha_para_mostrar(
     )
 
 
+
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — PARTES DEL DÍA
 # ==========================================================
+
 HORAS_PARTES_DIA = {
     "manana": "09:00",
     "mediodia": "12:00",
@@ -1686,6 +1697,7 @@ def extraer_todas_las_anticipaciones(
     ]
 
 
+
 def es_creacion_evento_natural(
     mensaje
 ):
@@ -1866,6 +1878,7 @@ def crear_evento_natural_desde_mensaje(
     respuesta += "."
 
     return respuesta
+
 
 
 # ==========================================================
@@ -2490,6 +2503,11 @@ def dejar_solo_aviso_desde_mensaje(
         f"{'aviso' if cancelados == 1 else 'avisos'} adicional"
         f"{'' if cancelados == 1 else 'es'}."
     )
+
+
+
+
+
 
 
 # ==========================================================
@@ -4837,6 +4855,7 @@ def procesar_confirmacion_aviso(
     )
 
 
+
 # ==========================================================
 # DURACIÓN DE EVENTOS — CAMBIAR DURACIÓN
 # ==========================================================
@@ -5270,6 +5289,7 @@ def es_cancelacion_evento(
             "borrar",
         )
     )
+
 
 
 def reprogramar_avisos_evento_seguro(
@@ -5821,6 +5841,10 @@ def mostrar_tareas_pendientes():
     )
 
 
+
+
+
+
 # ==========================================================
 # EVENTOS RECURRENTES
 # ==========================================================
@@ -6102,6 +6126,7 @@ def crear_evento_recurrente_desde_mensaje(
     respuesta += "."
 
     return respuesta
+
 
 
 def buscar_evento_recurrente_desde_mensaje(
@@ -7040,6 +7065,7 @@ def crear_rutina_desde_mensaje(
     )
 
 
+
 def buscar_rutina_desde_mensaje(
     mensaje
 ):
@@ -7334,6 +7360,7 @@ def editar_rutina_desde_mensaje(
         f"— {frecuencia_texto} "
         f"a las {actualizada[4]}."
     )
+
 
 
 def es_eliminacion_rutina(
@@ -8292,6 +8319,8 @@ def agenda_semana():
     )
 
 
+
+
 # ==========================================================
 # AUDITORÍA Y LIMPIEZA TAREA ↔ RECORDATORIOS
 # ==========================================================
@@ -8843,6 +8872,489 @@ def es_consulta_independiente(
 # ==========================================================
 
 
+
+
+
+# ==========================================================
+# CONFIGURACIÓN DEL RESUMEN NOCTURNO
+# ==========================================================
+
+def es_auditoria_resumen_nocturno(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_nocturno = any(
+        expresion in texto
+        for expresion in (
+            "resumen nocturno",
+            "resumen de la noche",
+            "cierre del dia",
+            "cierre diario",
+        )
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "revisa",
+            "revisar",
+            "audita",
+            "auditar",
+            "verifica",
+            "verificar",
+            "corrobora",
+            "corroborar",
+        )
+    )
+
+    return (
+        menciona_nocturno
+        and accion
+    )
+
+
+def revisar_resumen_nocturno_desde_hermes():
+    resultado = auditar_configuracion_resumen_nocturno()
+
+    correcciones = resultado.get(
+        "correcciones",
+        []
+    )
+
+    if resultado.get("estado") == "correcto":
+
+        estado = (
+            "activo"
+            if resultado.get("activo")
+            else "desactivado"
+        )
+
+        ultimo_envio = resultado.get(
+            "ultimo_envio"
+        )
+
+        respuesta = (
+            "La configuración del resumen nocturno "
+            f"está correcta. Está {estado} y "
+            f"programado para las "
+            f"{resultado.get('hora')}."
+        )
+
+        if ultimo_envio:
+            respuesta += (
+                f" Último envío registrado: "
+                f"{ultimo_envio}."
+            )
+
+        respuesta += (
+            " El control antidupl. está activo: "
+            "solo puede reclamarse un envío automático "
+            "por noche."
+        )
+
+        return respuesta
+
+    partes = [
+        "Revisé la configuración del resumen nocturno "
+        "y corregí lo necesario."
+    ]
+
+    if correcciones:
+        partes.append(
+            " ".join(correcciones)
+        )
+
+    partes.append(
+        "El control antidupl. quedó activo."
+    )
+
+    return " ".join(
+        partes
+    )
+
+
+def es_cambio_hora_resumen_nocturno(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_resumen = any(
+        expresion in texto
+        for expresion in (
+            "resumen nocturno",
+            "resumen de la noche",
+            "cierre del dia",
+            "cierre diario",
+        )
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "mandame",
+            "enviame",
+            "envia",
+            "cambia",
+            "cambiar",
+            "pone",
+            "poner",
+            "programa",
+            "programar",
+            "quiero",
+        )
+    )
+
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    return (
+        menciona_resumen
+        and accion
+        and hora is not None
+    )
+
+
+def cambiar_hora_resumen_nocturno_desde_mensaje(
+    mensaje
+):
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not hora:
+        return (
+            "No pude identificar la hora del "
+            "resumen nocturno."
+        )
+
+    estado, hora_guardada = configurar_hora_resumen_nocturno(
+        hora
+    )
+
+    if estado != "actualizada":
+        return (
+            "No pude guardar esa hora para "
+            "el resumen nocturno."
+        )
+
+    return (
+        f"Listo. El resumen nocturno automático "
+        f"queda programado para las "
+        f"{hora_guardada}."
+    )
+
+
+def es_consulta_hora_resumen_nocturno(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        expresion in texto
+        for expresion in (
+            "a que hora esta el resumen nocturno",
+            "a que hora tengo el resumen nocturno",
+            "a que hora se envia el resumen nocturno",
+            "hora del resumen nocturno",
+            "cuando se envia el resumen nocturno",
+            "cuando llega el resumen nocturno",
+            "a que hora esta el resumen de la noche",
+            "a que hora se envia el resumen de la noche",
+        )
+    )
+
+
+def mostrar_hora_resumen_nocturno():
+    configuracion = obtener_configuracion_resumen_nocturno()
+
+    if not configuracion:
+        return (
+            "No encontré la configuración "
+            "del resumen nocturno."
+        )
+
+    activo, hora, ultimo_envio = configuracion
+
+    estado = (
+        "activo"
+        if activo
+        else "desactivado"
+    )
+
+    respuesta = (
+        f"El resumen nocturno automático está "
+        f"{estado} y programado para las "
+        f"{hora}."
+    )
+
+    if ultimo_envio:
+        respuesta += (
+            f" Último envío registrado: "
+            f"{ultimo_envio}."
+        )
+
+    return respuesta
+
+
+# ==========================================================
+# RESUMEN NOCTURNO
+# ==========================================================
+
+def es_resumen_nocturno_manual(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    expresiones = (
+        "dame mi resumen nocturno",
+        "resumen nocturno",
+        "cierre del dia",
+        "cerrame el dia",
+        "como termino mi dia",
+        "como cerro mi dia",
+        "resumen de la noche",
+        "preparame para manana",
+        "que me queda para manana",
+    )
+
+    return any(
+        expresion in texto
+        for expresion in expresiones
+    )
+
+
+def generar_resumen_nocturno():
+    hoy = date.today()
+    manana = (
+        hoy
+        + timedelta(days=1)
+    )
+
+    hoy_iso = hoy.isoformat()
+    manana_iso = manana.isoformat()
+
+    tareas_pendientes = obtener_tareas_pendientes()
+    tareas_completadas = obtener_tareas_completadas_en_fecha(
+        hoy_iso
+    )
+
+    tareas_atrasadas = []
+
+    for tarea in tareas_pendientes:
+
+        if not tarea[3]:
+            continue
+
+        try:
+            fecha_tarea = date.fromisoformat(
+                tarea[3]
+            )
+
+        except ValueError:
+            continue
+
+        if fecha_tarea < hoy:
+            tareas_atrasadas.append(
+                tarea
+            )
+
+    tareas_manana = obtener_tareas_por_fecha(
+        manana_iso
+    )
+
+    eventos_hoy = obtener_eventos_por_fecha(
+        hoy_iso
+    )
+
+    eventos_manana = obtener_eventos_por_fecha(
+        manana_iso
+    )
+
+    lineas = [
+        (
+            f"Resumen nocturno — "
+            f"{hoy.strftime('%d/%m/%Y')}"
+        ),
+        "",
+        (
+            f"Hoy completaste "
+            f"{len(tareas_completadas)} "
+            f"{'tarea' if len(tareas_completadas) == 1 else 'tareas'}. "
+            f"Quedan {len(tareas_atrasadas)} "
+            f"{'tarea atrasada' if len(tareas_atrasadas) == 1 else 'tareas atrasadas'}."
+        ),
+        "",
+        "✅ Completado hoy:",
+    ]
+
+    if tareas_completadas:
+
+        for tarea in tareas_completadas:
+
+            prioridad = (
+                tarea[5]
+                if len(tarea) > 5 and tarea[5]
+                else "media"
+            )
+
+            lineas.append(
+                f"- #{tarea[0]} {tarea[1]} "
+                f"— prioridad {prioridad}"
+            )
+
+    else:
+        lineas.append(
+            "No registraste tareas completadas hoy."
+        )
+
+    lineas.extend(
+        [
+            "",
+            "⚠️ Pendientes atrasados:",
+        ]
+    )
+
+    if tareas_atrasadas:
+
+        atrasadas_ordenadas = sorted(
+            tareas_atrasadas,
+            key=puntaje_urgencia_tarea
+        )
+
+        for tarea in atrasadas_ordenadas:
+
+            lineas.append(
+                f"- {formatear_tarea_resumen(tarea)}"
+            )
+
+    else:
+        lineas.append(
+            "No tenés tareas atrasadas."
+        )
+
+    lineas.extend(
+        [
+            "",
+            "📅 Lo que pasó hoy:",
+        ]
+    )
+
+    if eventos_hoy:
+
+        for evento in eventos_hoy:
+
+            texto_evento = (
+                f"- #{evento[0]} {evento[1]}"
+            )
+
+            if evento[4]:
+                texto_evento += (
+                    f" — {evento[4]}"
+                )
+
+            if evento[5]:
+                texto_evento += (
+                    f" a {evento[5]}"
+                )
+
+            lineas.append(
+                texto_evento
+            )
+
+    else:
+        lineas.append(
+            "No tenías eventos registrados para hoy."
+        )
+
+    lineas.extend(
+        [
+            "",
+            "🌅 Mañana:",
+        ]
+    )
+
+    if tareas_manana:
+
+        lineas.append(
+            "Tareas:"
+        )
+
+        tareas_manana_ordenadas = sorted(
+            tareas_manana,
+            key=puntaje_urgencia_tarea
+        )
+
+        for tarea in tareas_manana_ordenadas:
+            lineas.append(
+                f"- {formatear_tarea_resumen(tarea)}"
+            )
+
+    else:
+        lineas.append(
+            "No tenés tareas con vencimiento mañana."
+        )
+
+    if eventos_manana:
+
+        lineas.append(
+            "Eventos:"
+        )
+
+        for evento in eventos_manana:
+
+            texto_evento = (
+                f"- #{evento[0]} {evento[1]}"
+            )
+
+            if evento[4]:
+                texto_evento += (
+                    f" — {evento[4]}"
+                )
+
+            if evento[5]:
+                texto_evento += (
+                    f" a {evento[5]}"
+                )
+
+            lineas.append(
+                texto_evento
+            )
+
+    else:
+        lineas.append(
+            "No tenés eventos mañana."
+        )
+
+    if tareas_atrasadas:
+
+        mas_urgente = sorted(
+            tareas_atrasadas,
+            key=puntaje_urgencia_tarea
+        )[0]
+
+        lineas.extend(
+            [
+                "",
+                "🎯 Foco recomendado para mañana:",
+                f"- {formatear_tarea_resumen(mas_urgente)}",
+            ]
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
 # ==========================================================
 # CONFIGURACIÓN DEL RESUMEN DIARIO
 # ==========================================================
@@ -9369,6 +9881,44 @@ def procesar_comandos_directos(
     texto = normalizar_texto(
         mensaje
     )
+
+    if es_auditoria_resumen_nocturno(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return revisar_resumen_nocturno_desde_hermes()
+
+    if es_cambio_hora_resumen_nocturno(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return cambiar_hora_resumen_nocturno_desde_mensaje(
+            mensaje
+        )
+
+    if es_consulta_hora_resumen_nocturno(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return mostrar_hora_resumen_nocturno()
+
+    if es_resumen_nocturno_manual(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return generar_resumen_nocturno()
 
     if es_auditoria_resumen_diario(
         mensaje
@@ -10509,6 +11059,16 @@ if hora_resumen_configurada:
     )
 
 print("🧪 Auditoría y control antidupl. del resumen diario: activos")
+print("🌙 Resumen nocturno manual: activo")
+hora_resumen_nocturno_configurada = obtener_hora_resumen_nocturno()
+
+if hora_resumen_nocturno_configurada:
+    print(
+        f"🌃 Resumen nocturno automático: activo a las "
+        f"{hora_resumen_nocturno_configurada}"
+    )
+
+print("🧪 Auditoría y control antidupl. del resumen nocturno: activos")
 print()
 print("Escribí 'salir' para terminar.")
 print()
