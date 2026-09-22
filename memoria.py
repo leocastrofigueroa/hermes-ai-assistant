@@ -1,4 +1,5 @@
 import sqlite3
+import unicodedata
 from datetime import datetime
 
 
@@ -351,6 +352,63 @@ def obtener_recuerdos():
     conexion.close()
 
     return resultados
+
+
+def buscar_recuerdos(
+    termino
+):
+    termino = str(
+        termino or ""
+    ).strip()
+
+    if not termino:
+        return []
+
+    def normalizar(
+        texto
+    ):
+        texto = unicodedata.normalize(
+            "NFD",
+            str(texto or "").lower(),
+        )
+
+        return "".join(
+            caracter
+            for caracter in texto
+            if unicodedata.category(
+                caracter
+            ) != "Mn"
+        )
+
+    termino_normalizado = normalizar(
+        termino
+    )
+
+    resultados = []
+
+    for categoria, clave, valor in obtener_recuerdos():
+        contenido = " ".join(
+            (
+                str(categoria or ""),
+                str(clave or ""),
+                str(valor or ""),
+            )
+        )
+
+        if termino_normalizado in normalizar(
+            contenido
+        ):
+            resultados.append(
+                (
+                    categoria,
+                    clave,
+                    valor,
+                )
+            )
+
+    return resultados
+
+
 
 
 # ==========================================================
@@ -1126,6 +1184,136 @@ def limpiar_notas_db():
         "categorias_reparadas": categorias_reparadas,
         "notas_marcadas_eliminadas": notas_marcadas,
     }
+
+
+
+
+def buscar_notas(
+    termino
+):
+    termino = str(
+        termino or ""
+    ).strip()
+
+    if not termino:
+        return []
+
+    def normalizar(
+        texto
+    ):
+        texto = unicodedata.normalize(
+            "NFD",
+            str(texto or "").lower(),
+        )
+
+        return "".join(
+            caracter
+            for caracter in texto
+            if unicodedata.category(
+                caracter
+            ) != "Mn"
+        )
+
+    termino_normalizado = normalizar(
+        termino
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            contenido,
+            estado,
+            fecha_creacion,
+            fecha_actualizacion,
+            categoria
+        FROM notas
+        WHERE estado = 'activa'
+        ORDER BY id DESC
+    """)
+
+    notas = cursor.fetchall()
+
+    conexion.close()
+
+    resultados = []
+
+    for nota in notas:
+        contenido_busqueda = " ".join(
+            (
+                str(nota[1] or ""),
+                str(nota[2] or ""),
+                str(nota[6] or ""),
+            )
+        )
+
+        if termino_normalizado in normalizar(
+            contenido_busqueda
+        ):
+            resultados.append(
+                nota
+            )
+
+    return resultados
+
+
+def auditar_busqueda_local_db():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    notas_activas = cursor.execute("""
+        SELECT COUNT(*)
+        FROM notas
+        WHERE estado = 'activa'
+    """).fetchone()[0]
+
+    recuerdos = cursor.execute("""
+        SELECT COUNT(*)
+        FROM recuerdos
+    """).fetchone()[0]
+
+    conexion.close()
+
+    errores = []
+
+    try:
+        buscar_notas(
+            ""
+        )
+        buscar_notas(
+            "prueba"
+        )
+    except Exception as error:
+        errores.append(
+            f"notas: {error}"
+        )
+
+    try:
+        buscar_recuerdos(
+            ""
+        )
+        buscar_recuerdos(
+            "prueba"
+        )
+    except Exception as error:
+        errores.append(
+            f"memoria: {error}"
+        )
+
+    return {
+        "notas_activas": int(
+            notas_activas or 0
+        ),
+        "recuerdos": int(
+            recuerdos or 0
+        ),
+        "errores": errores,
+        "correcto": not errores,
+    }
+
 
 
 

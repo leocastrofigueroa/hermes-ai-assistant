@@ -10,6 +10,7 @@ from memoria import (
     crear_base,
     guardar_recuerdo,
     obtener_recuerdos,
+    buscar_recuerdos,
     guardar_mensaje_conversacion,
     obtener_historial_conversacion,
     limpiar_historial_conversacion,
@@ -29,6 +30,8 @@ from memoria import (
     obtener_categorias_notas,
     auditar_notas_db,
     limpiar_notas_db,
+    buscar_notas,
+    auditar_busqueda_local_db,
     crear_tarea,
     obtener_tareas_pendientes,
     obtener_tareas_por_fecha,
@@ -1167,6 +1170,115 @@ def mostrar_notas_por_categoria_desde_mensaje(
     for nota in notas:
         lineas.append(
             f"#{nota[0]} — {nota[1]}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+
+
+def es_busqueda_notas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"^(?:busca|buscar|buscame|búscame)\s+(?:en\s+)?(?:mis\s+)?notas\b",
+        r"^(?:busca|buscar|buscame|búscame)\s+notas\b",
+        r"^(?:encontra|encontrá|encontrar)\s+(?:en\s+)?(?:mis\s+)?notas\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto
+        )
+        for patron in patrones
+    )
+
+
+def extraer_termino_busqueda_notas(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    patrones = (
+        r"^\s*busc[áa](?:me)?\s+en\s+mis\s+notas\s+",
+        r"^\s*busc[áa](?:me)?\s+notas\s+",
+        r"^\s*buscar\s+en\s+mis\s+notas\s+",
+        r"^\s*buscar\s+notas\s+",
+        r"^\s*encontr[áa]\s+en\s+mis\s+notas\s+",
+        r"^\s*encontrar\s+en\s+mis\s+notas\s+",
+    )
+
+    termino = texto
+
+    for patron in patrones:
+        nuevo = re.sub(
+            patron,
+            "",
+            termino,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        if nuevo != termino:
+            termino = nuevo.strip()
+            break
+
+    termino = re.sub(
+        r"^(?:sobre|de|con|que\s+digan|que\s+tengan)\s+",
+        "",
+        termino,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    return termino.strip(
+        " .,:;-"
+    )
+
+
+def buscar_notas_desde_mensaje(
+    mensaje
+):
+    termino = extraer_termino_busqueda_notas(
+        mensaje
+    )
+
+    if not termino:
+        return (
+            "Decime qué querés buscar en tus notas."
+        )
+
+    resultados = buscar_notas(
+        termino
+    )
+
+    if not resultados:
+        return (
+            f'No encontré notas que coincidan con "{termino}".'
+        )
+
+    lineas = [
+        f'Resultados para "{termino}":'
+    ]
+
+    for nota in resultados:
+        categoria = (
+            nota[6]
+            if len(nota) > 6 and nota[6]
+            else "general"
+        )
+
+        lineas.append(
+            f"#{nota[0]} [{categoria}] — {nota[1]}"
         )
 
     return "\n".join(
@@ -7179,6 +7291,276 @@ def procesar_confirmacion_pendiente(
 # MEMORIA
 # ==========================================================
 
+def es_auditoria_busqueda_local(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "audita la busqueda",
+            "auditar la busqueda",
+            "audita busqueda",
+            "revisa la busqueda",
+            "revisar la busqueda",
+            "audita notas y memoria",
+            "revisa notas y memoria",
+        )
+    )
+
+
+def auditar_busqueda_local():
+    datos = auditar_busqueda_local_db()
+
+    if datos["correcto"]:
+        return (
+            "La búsqueda está correcta. "
+            f'Notas activas indexables: {datos["notas_activas"]}. '
+            f'Recuerdos indexables: {datos["recuerdos"]}.'
+        )
+
+    return (
+        "Encontré problemas en la búsqueda: "
+        + "; ".join(
+            datos["errores"]
+        )
+        + "."
+    )
+
+
+def es_busqueda_combinada(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"^(?:busca|buscar|buscame)\s+(?:en\s+)?(?:mis\s+)?notas\s+y\s+(?:en\s+)?(?:mi\s+)?memoria\b",
+        r"^(?:busca|buscar|buscame)\s+(?:en\s+)?(?:mi\s+)?memoria\s+y\s+(?:en\s+)?(?:mis\s+)?notas\b",
+        r"^(?:busca|buscar|buscame)\s+(?:en\s+)?todo\b",
+        r"^(?:busca|buscar|buscame)\s+(?:en\s+)?notas\s+y\s+memoria\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto,
+        )
+        for patron in patrones
+    )
+
+
+def extraer_termino_busqueda_combinada(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    patrones = (
+        r"^\s*busc[áa](?:me)?\s+(?:en\s+)?(?:mis\s+)?notas\s+y\s+(?:en\s+)?(?:mi\s+)?memoria\s+",
+        r"^\s*busc[áa](?:me)?\s+(?:en\s+)?(?:mi\s+)?memoria\s+y\s+(?:en\s+)?(?:mis\s+)?notas\s+",
+        r"^\s*busc[áa](?:me)?\s+(?:en\s+)?todo\s+",
+        r"^\s*buscar\s+(?:en\s+)?(?:mis\s+)?notas\s+y\s+(?:en\s+)?(?:mi\s+)?memoria\s+",
+        r"^\s*buscar\s+(?:en\s+)?(?:mi\s+)?memoria\s+y\s+(?:en\s+)?(?:mis\s+)?notas\s+",
+        r"^\s*buscar\s+(?:en\s+)?todo\s+",
+    )
+
+    termino = texto
+
+    for patron in patrones:
+        nuevo = re.sub(
+            patron,
+            "",
+            termino,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        if nuevo != termino:
+            termino = nuevo.strip()
+            break
+
+    termino = re.sub(
+        r"^(?:sobre|de|con)\s+",
+        "",
+        termino,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    return termino.strip(
+        " .,:;-"
+    )
+
+
+def buscar_notas_y_memoria_desde_mensaje(
+    mensaje
+):
+    termino = extraer_termino_busqueda_combinada(
+        mensaje
+    )
+
+    if not termino:
+        return (
+            "Decime qué querés buscar en notas y memoria."
+        )
+
+    notas = buscar_notas(
+        termino
+    )
+
+    recuerdos = buscar_recuerdos(
+        termino
+    )
+
+    if not notas and not recuerdos:
+        return (
+            f'No encontré coincidencias para "{termino}" '
+            f'en notas ni en memoria.'
+        )
+
+    lineas = [
+        f'Resultados para "{termino}":'
+    ]
+
+    if notas:
+        lineas.append(
+            "Notas:"
+        )
+
+        for nota in notas:
+            categoria = (
+                nota[6]
+                if len(nota) > 6 and nota[6]
+                else "general"
+            )
+
+            lineas.append(
+                f"- #{nota[0]} [{categoria}] — {nota[1]}"
+            )
+
+    if recuerdos:
+        lineas.append(
+            "Memoria:"
+        )
+
+        for categoria, clave, valor in recuerdos:
+            lineas.append(
+                f"- [{categoria}] {clave}: {valor}"
+            )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def es_busqueda_memoria(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"^(?:busca|buscar|buscame)\s+(?:en\s+)?(?:mi\s+)?memoria\b",
+        r"^(?:busca|buscar|buscame)\s+(?:en\s+)?(?:mis\s+)?recuerdos\b",
+        r"^(?:encontra|encontrar)\s+(?:en\s+)?(?:mi\s+)?memoria\b",
+        r"^(?:encontra|encontrar)\s+(?:en\s+)?(?:mis\s+)?recuerdos\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto,
+        )
+        for patron in patrones
+    )
+
+
+def extraer_termino_busqueda_memoria(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    patrones = (
+        r"^\s*busc[áa](?:me)?\s+(?:en\s+)?(?:mi\s+)?memoria\s+",
+        r"^\s*busc[áa](?:me)?\s+(?:en\s+)?(?:mis\s+)?recuerdos\s+",
+        r"^\s*buscar\s+(?:en\s+)?(?:mi\s+)?memoria\s+",
+        r"^\s*buscar\s+(?:en\s+)?(?:mis\s+)?recuerdos\s+",
+        r"^\s*encontr[áa]\s+(?:en\s+)?(?:mi\s+)?memoria\s+",
+        r"^\s*encontrar\s+(?:en\s+)?(?:mi\s+)?memoria\s+",
+    )
+
+    termino = texto
+
+    for patron in patrones:
+        nuevo = re.sub(
+            patron,
+            "",
+            termino,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        if nuevo != termino:
+            termino = nuevo.strip()
+            break
+
+    termino = re.sub(
+        r"^(?:sobre|de|con|que\s+diga|que\s+tenga)\s+",
+        "",
+        termino,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    return termino.strip(
+        " .,:;-"
+    )
+
+
+def buscar_memoria_desde_mensaje(
+    mensaje
+):
+    termino = extraer_termino_busqueda_memoria(
+        mensaje
+    )
+
+    if not termino:
+        return (
+            "Decime qué querés buscar en mi memoria."
+        )
+
+    resultados = buscar_recuerdos(
+        termino
+    )
+
+    if not resultados:
+        return (
+            f'No encontré recuerdos que coincidan con "{termino}".'
+        )
+
+    lineas = [
+        f'Recuerdos para "{termino}":'
+    ]
+
+    for categoria, clave, valor in resultados:
+        lineas.append(
+            f"- [{categoria}] {clave}: {valor}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
 def obtener_texto_memoria():
     recuerdos = obtener_recuerdos()
 
@@ -11990,6 +12372,35 @@ def procesar_comandos_directos(
         mensaje
     )
 
+    if es_auditoria_busqueda_local(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return auditar_busqueda_local()
+
+    if es_busqueda_combinada(
+        mensaje
+    ):
+        return buscar_notas_y_memoria_desde_mensaje(
+            mensaje
+        )
+
+    if es_busqueda_memoria(
+        mensaje
+    ):
+        return buscar_memoria_desde_mensaje(
+            mensaje
+        )
+
+    if es_busqueda_notas(
+        mensaje
+    ):
+        return buscar_notas_desde_mensaje(
+            mensaje
+        )
+
     if es_auditoria_notas(
         mensaje
     ):
@@ -13398,6 +13809,10 @@ print("🔗 Referencias naturales de conversación: activas")
 print("🗜️ Compresión automática del contexto: activa")
 print("🧪 Auditoría y limpieza del contexto: activas")
 print("📝 Sistema de notas: creación, edición, categorías y auditoría activas")
+print("🔎 Búsqueda de notas por texto: activa")
+print("🧠 Búsqueda en memoria permanente: activa")
+print("🔎 Búsqueda combinada notas + memoria: activa")
+print("🧪 Auditoría de búsqueda local: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()
