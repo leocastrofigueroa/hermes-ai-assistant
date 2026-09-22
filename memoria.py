@@ -80,6 +80,37 @@ def crear_base():
         """)
 
     # ------------------------------------------------------
+    # RUTINAS RECURRENTES
+    # ------------------------------------------------------
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rutinas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            frecuencia TEXT NOT NULL,
+            dia_semana TEXT,
+            hora TEXT NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'activa',
+            ultimo_disparo TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    columnas_rutinas = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(rutinas)"
+        ).fetchall()
+    }
+
+    if "ultimo_disparo" not in columnas_rutinas:
+        cursor.execute("""
+            ALTER TABLE rutinas
+            ADD COLUMN ultimo_disparo TEXT
+        """)
+
+    # ------------------------------------------------------
     # EVENTOS
     # ------------------------------------------------------
 
@@ -458,6 +489,330 @@ def modificar_tarea(
     return (
         "actualizado",
         tarea_id
+    )
+
+
+# ==========================================================
+# RUTINAS RECURRENTES
+# ==========================================================
+
+def crear_rutina(
+    titulo,
+    frecuencia,
+    hora,
+    dia_semana=None
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        INSERT INTO rutinas (
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora,
+            estado
+        )
+        VALUES (?, ?, ?, ?, 'activa')
+    """, (
+        titulo.strip(),
+        frecuencia.strip().lower(),
+        (
+            dia_semana.strip().lower()
+            if dia_semana
+            else None
+        ),
+        hora,
+    ))
+
+    rutina_id = cursor.lastrowid
+
+    conexion.commit()
+    conexion.close()
+
+    return rutina_id
+
+
+def obtener_rutinas():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora,
+            estado,
+            ultimo_disparo
+        FROM rutinas
+        WHERE estado != 'eliminada'
+        ORDER BY
+            CASE estado
+                WHEN 'activa' THEN 0
+                ELSE 1
+            END,
+            CASE frecuencia
+                WHEN 'diaria' THEN 0
+                WHEN 'semanal' THEN 1
+                ELSE 2
+            END,
+            CASE dia_semana
+                WHEN 'lunes' THEN 0
+                WHEN 'martes' THEN 1
+                WHEN 'miercoles' THEN 2
+                WHEN 'jueves' THEN 3
+                WHEN 'viernes' THEN 4
+                WHEN 'sabado' THEN 5
+                WHEN 'domingo' THEN 6
+                ELSE 7
+            END,
+            hora ASC,
+            id ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_rutinas_activas():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora,
+            estado,
+            ultimo_disparo
+        FROM rutinas
+        WHERE estado = 'activa'
+        ORDER BY
+            CASE frecuencia
+                WHEN 'diaria' THEN 0
+                WHEN 'semanal' THEN 1
+                ELSE 2
+            END,
+            CASE dia_semana
+                WHEN 'lunes' THEN 0
+                WHEN 'martes' THEN 1
+                WHEN 'miercoles' THEN 2
+                WHEN 'jueves' THEN 3
+                WHEN 'viernes' THEN 4
+                WHEN 'sabado' THEN 5
+                WHEN 'domingo' THEN 6
+                ELSE 7
+            END,
+            hora ASC,
+            id ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_rutina_por_id(
+    rutina_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora,
+            estado,
+            ultimo_disparo
+        FROM rutinas
+        WHERE id = ?
+        LIMIT 1
+    """, (
+        rutina_id,
+    ))
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
+def modificar_rutina(
+    rutina_id,
+    titulo=None,
+    frecuencia=None,
+    dia_semana=None,
+    hora=None
+):
+    actual = obtener_rutina_por_id(
+        rutina_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    titulo_final = (
+        titulo.strip()
+        if titulo is not None
+        else actual[1]
+    )
+
+    frecuencia_final = (
+        frecuencia.strip().lower()
+        if frecuencia is not None
+        else actual[2]
+    )
+
+    if frecuencia_final == "diaria":
+        dia_final = None
+    elif dia_semana is not None:
+        dia_final = (
+            dia_semana.strip().lower()
+            if dia_semana
+            else None
+        )
+    else:
+        dia_final = actual[3]
+
+    hora_final = (
+        hora
+        if hora is not None
+        else actual[4]
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE rutinas
+        SET titulo = ?,
+            frecuencia = ?,
+            dia_semana = ?,
+            hora = ?,
+            ultimo_disparo = NULL,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (
+        titulo_final,
+        frecuencia_final,
+        dia_final,
+        hora_final,
+        rutina_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizada",
+        rutina_id
+    )
+
+
+def cambiar_estado_rutina(
+    rutina_id,
+    nuevo_estado
+):
+    if nuevo_estado not in (
+        "activa",
+        "pausada",
+    ):
+        return (
+            "estado_invalido",
+            rutina_id
+        )
+
+    actual = obtener_rutina_por_id(
+        rutina_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[5] == nuevo_estado:
+        return (
+            "sin_cambios",
+            rutina_id
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE rutinas
+        SET estado = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (
+        nuevo_estado,
+        rutina_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizada",
+        rutina_id
+    )
+
+
+def eliminar_rutina(
+    rutina_id
+):
+    actual = obtener_rutina_por_id(
+        rutina_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[5] == "eliminada":
+        return (
+            "ya_eliminada",
+            rutina_id
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE rutinas
+        SET estado = 'eliminada',
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (
+        rutina_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "eliminada",
+        rutina_id
     )
 
 

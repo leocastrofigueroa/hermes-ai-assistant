@@ -16,6 +16,13 @@ from memoria import (
     completar_tarea,
     obtener_tarea_por_id,
     modificar_tarea,
+    crear_rutina,
+    obtener_rutinas,
+    obtener_rutinas_activas,
+    obtener_rutina_por_id,
+    modificar_rutina,
+    cambiar_estado_rutina,
+    eliminar_rutina,
     crear_evento,
     obtener_eventos_activos,
     obtener_eventos_por_fecha,
@@ -77,6 +84,9 @@ Tenés memoria permanente.
 Una TAREA es algo pendiente por hacer.
 Un EVENTO ocupa un momento determinado de la agenda.
 Un RECORDATORIO avisa activamente en una fecha y hora.
+Una RUTINA es una acción o recordatorio que se repite
+con una frecuencia definida, por ejemplo todos los días
+o todos los lunes.
 
 Los recordatorios pueden estar vinculados a eventos.
 
@@ -510,9 +520,11 @@ def autoriza_creacion_evento_desde_modelo(
     )
 
 
+
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — DESPLAZAMIENTOS RELATIVOS
 # ==========================================================
+
 NUMEROS_TEMPORALES = {
     "un": 1,
     "una": 1,
@@ -672,6 +684,7 @@ def extraer_hora_relativa_avanzada(
     )
 
 
+
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — DÍAS NATURALES
 # ==========================================================
@@ -816,6 +829,7 @@ def extraer_fecha_natural_avanzada(
             )
 
     return None
+
 
 
 # ==========================================================
@@ -1198,9 +1212,11 @@ def fecha_para_mostrar(
     )
 
 
+
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — PARTES DEL DÍA
 # ==========================================================
+
 HORAS_PARTES_DIA = {
     "manana": "09:00",
     "mediodia": "12:00",
@@ -1664,6 +1680,7 @@ def extraer_todas_las_anticipaciones(
     ]
 
 
+
 def es_creacion_evento_natural(
     mensaje
 ):
@@ -1844,6 +1861,7 @@ def crear_evento_natural_desde_mensaje(
     respuesta += "."
 
     return respuesta
+
 
 
 # ==========================================================
@@ -2468,6 +2486,11 @@ def dejar_solo_aviso_desde_mensaje(
         f"{'aviso' if cancelados == 1 else 'avisos'} adicional"
         f"{'' if cancelados == 1 else 'es'}."
     )
+
+
+
+
+
 
 
 # ==========================================================
@@ -4815,6 +4838,7 @@ def procesar_confirmacion_aviso(
     )
 
 
+
 # ==========================================================
 # DURACIÓN DE EVENTOS — CAMBIAR DURACIÓN
 # ==========================================================
@@ -5248,6 +5272,7 @@ def es_cancelacion_evento(
             "borrar",
         )
     )
+
 
 
 def reprogramar_avisos_evento_seguro(
@@ -5796,6 +5821,938 @@ def mostrar_tareas_pendientes():
 
     return "\n".join(
         lineas
+    )
+
+
+
+
+
+# ==========================================================
+# RUTINAS RECURRENTES
+# ==========================================================
+
+DIAS_SEMANA_RUTINA = (
+    "lunes",
+    "martes",
+    "miercoles",
+    "jueves",
+    "viernes",
+    "sabado",
+    "domingo",
+)
+
+
+def extraer_recurrencia_rutina(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if any(
+        expresion in texto
+        for expresion in (
+            "todos los dias",
+            "cada dia",
+            "diariamente",
+        )
+    ):
+        return (
+            "diaria",
+            None
+        )
+
+    for dia in DIAS_SEMANA_RUTINA:
+
+        if any(
+            expresion in texto
+            for expresion in (
+                f"todos los {dia}",
+                f"cada {dia}",
+            )
+        ):
+            return (
+                "semanal",
+                dia
+            )
+
+    return (
+        None,
+        None
+    )
+
+
+def es_creacion_rutina(
+    mensaje
+):
+    frecuencia, _ = extraer_recurrencia_rutina(
+        mensaje
+    )
+
+    if not frecuencia:
+        return False
+
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "recordame",
+            "recordar",
+            "crea una rutina",
+            "crear una rutina",
+            "agrega una rutina",
+            "agregame una rutina",
+        )
+    )
+
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    return (
+        accion
+        and hora is not None
+    )
+
+
+def extraer_titulo_rutina(
+    mensaje
+):
+    titulo = mensaje.strip()
+
+    patrones = (
+        r"^\s*todos\s+los\s+d[ií]as?\s*",
+        r"^\s*cada\s+d[ií]a\s*",
+        r"^\s*diariamente\s*",
+        r"^\s*todos\s+los\s+lunes\s*",
+        r"^\s*todos\s+los\s+martes\s*",
+        r"^\s*todos\s+los\s+mi[eé]rcoles\s*",
+        r"^\s*todos\s+los\s+jueves\s*",
+        r"^\s*todos\s+los\s+viernes\s*",
+        r"^\s*todos\s+los\s+s[aá]bados\s*",
+        r"^\s*todos\s+los\s+domingos\s*",
+        r"^\s*cada\s+lunes\s*",
+        r"^\s*cada\s+martes\s*",
+        r"^\s*cada\s+mi[eé]rcoles\s*",
+        r"^\s*cada\s+jueves\s*",
+        r"^\s*cada\s+viernes\s*",
+        r"^\s*cada\s+s[aá]bado\s*",
+        r"^\s*cada\s+domingo\s*",
+    )
+
+    for patron in patrones:
+        titulo = re.sub(
+            patron,
+            "",
+            titulo,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    titulo = re.sub(
+        r"\b(?:a\s+las?|a\s+la)\s+\d{1,2}(?::\d{2})?\b",
+        " ",
+        titulo,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\b(?:recordame|recu[eé]rdame|recordar)\b",
+        " ",
+        titulo,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\b(?:que|de)\b\s*$",
+        " ",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    titulo = re.sub(
+        r"\s+",
+        " ",
+        titulo
+    ).strip(" .,-")
+
+    if titulo:
+        titulo = (
+            titulo[0].upper()
+            + titulo[1:]
+        )
+
+    return titulo
+
+
+def crear_rutina_desde_mensaje(
+    mensaje
+):
+    frecuencia, dia_semana = extraer_recurrencia_rutina(
+        mensaje
+    )
+
+    if not frecuencia:
+
+        return (
+            "No pude identificar cada cuánto "
+            "querés repetir la rutina."
+        )
+
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not hora:
+
+        return (
+            "Necesito saber a qué hora "
+            "querés ejecutar la rutina."
+        )
+
+    titulo = extraer_titulo_rutina(
+        mensaje
+    )
+
+    if not titulo:
+
+        return (
+            "No pude identificar qué querés "
+            "que te recuerde."
+        )
+
+    existentes = obtener_rutinas_activas()
+
+    for rutina in existentes:
+
+        if (
+            normalizar_texto(rutina[1])
+            == normalizar_texto(titulo)
+            and rutina[2] == frecuencia
+            and rutina[3] == dia_semana
+            and rutina[4] == hora
+        ):
+
+            return (
+                f"Esa rutina ya existe como "
+                f"#{rutina[0]}."
+            )
+
+    rutina_id = crear_rutina(
+        titulo=titulo,
+        frecuencia=frecuencia,
+        hora=hora,
+        dia_semana=dia_semana,
+    )
+
+    if frecuencia == "diaria":
+
+        recurrencia = "todos los días"
+
+    else:
+
+        recurrencia = (
+            f"todos los {dia_semana}"
+        )
+
+    return (
+        f"Listo. Creé la rutina "
+        f"#{rutina_id}: {titulo} — "
+        f"{recurrencia} a las {hora}."
+    )
+
+
+
+def buscar_rutina_desde_mensaje(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    coincidencia = re.search(
+        r"\brutina\s*#?\s*(\d+)\b",
+        texto
+    )
+
+    if coincidencia:
+
+        rutina = obtener_rutina_por_id(
+            int(coincidencia.group(1))
+        )
+
+        if rutina:
+            return rutina
+
+    rutinas = obtener_rutinas()
+
+    candidatos = []
+
+    for rutina in rutinas:
+
+        puntuacion = puntuacion_coincidencia(
+            mensaje,
+            rutina[1]
+        )
+
+        if puntuacion > 0:
+
+            candidatos.append(
+                (
+                    puntuacion,
+                    rutina,
+                )
+            )
+
+    if not candidatos:
+        return None
+
+    candidatos.sort(
+        key=lambda elemento: (
+            -elemento[0],
+            elemento[1][0],
+        )
+    )
+
+    return candidatos[0][1]
+
+
+def es_pausa_rutina(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return (
+        "rutina" in texto
+        and any(
+            expresion in texto
+            for expresion in (
+                "pausa",
+                "pausar",
+                "suspende",
+                "suspender",
+                "detene",
+                "detener",
+            )
+        )
+    )
+
+
+def es_reanudacion_rutina(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return (
+        "rutina" in texto
+        and any(
+            expresion in texto
+            for expresion in (
+                "reanuda",
+                "reanudar",
+                "reactiva",
+                "reactivar",
+                "activa",
+                "activar",
+            )
+        )
+    )
+
+
+def pausar_rutina_desde_mensaje(
+    mensaje
+):
+    rutina = buscar_rutina_desde_mensaje(
+        mensaje
+    )
+
+    if not rutina:
+
+        return (
+            "No pude identificar qué rutina "
+            "querés pausar."
+        )
+
+    estado, _ = cambiar_estado_rutina(
+        rutina[0],
+        "pausada"
+    )
+
+    if estado == "sin_cambios":
+
+        return (
+            f"La rutina #{rutina[0]}: "
+            f"{rutina[1]} ya estaba pausada."
+        )
+
+    if estado != "actualizada":
+
+        return (
+            "No pude pausar esa rutina."
+        )
+
+    return (
+        f"Listo. Pausé la rutina "
+        f"#{rutina[0]}: {rutina[1]}."
+    )
+
+
+def reanudar_rutina_desde_mensaje(
+    mensaje
+):
+    rutina = buscar_rutina_desde_mensaje(
+        mensaje
+    )
+
+    if not rutina:
+
+        return (
+            "No pude identificar qué rutina "
+            "querés reanudar."
+        )
+
+    estado, _ = cambiar_estado_rutina(
+        rutina[0],
+        "activa"
+    )
+
+    if estado == "sin_cambios":
+
+        return (
+            f"La rutina #{rutina[0]}: "
+            f"{rutina[1]} ya estaba activa."
+        )
+
+    if estado != "actualizada":
+
+        return (
+            "No pude reanudar esa rutina."
+        )
+
+    return (
+        f"Listo. Reanudé la rutina "
+        f"#{rutina[0]}: {rutina[1]}."
+    )
+
+
+def es_edicion_rutina(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    if "rutina" not in texto:
+        return False
+
+    if es_pausa_rutina(
+        mensaje
+    ) or es_reanudacion_rutina(
+        mensaje
+    ):
+        return False
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "cambia",
+            "cambiar",
+            "move",
+            "mover",
+            "pasa",
+            "pasar",
+            "edita",
+            "editar",
+            "reprograma",
+            "reprogramar",
+        )
+    )
+
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    frecuencia, dia_semana = extraer_recurrencia_rutina(
+        mensaje
+    )
+
+    return (
+        accion
+        and (
+            hora is not None
+            or frecuencia is not None
+            or dia_semana is not None
+        )
+    )
+
+
+def editar_rutina_desde_mensaje(
+    mensaje
+):
+    rutina = buscar_rutina_desde_mensaje(
+        mensaje
+    )
+
+    if not rutina:
+
+        return (
+            "No pude identificar qué rutina "
+            "querés editar."
+        )
+
+    hora_nueva, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    frecuencia_nueva, dia_nuevo = extraer_recurrencia_rutina(
+        mensaje
+    )
+
+    if (
+        hora_nueva is None
+        and frecuencia_nueva is None
+    ):
+
+        return (
+            "No pude identificar qué querés "
+            "cambiar de la rutina."
+        )
+
+    estado, _ = modificar_rutina(
+        rutina[0],
+        frecuencia=frecuencia_nueva,
+        dia_semana=dia_nuevo,
+        hora=hora_nueva,
+    )
+
+    if estado != "actualizada":
+
+        return (
+            "No pude editar esa rutina."
+        )
+
+    actualizada = obtener_rutina_por_id(
+        rutina[0]
+    )
+
+    if actualizada[2] == "diaria":
+
+        frecuencia_texto = (
+            "todos los días"
+        )
+
+    else:
+
+        frecuencia_texto = (
+            f"todos los {actualizada[3]}"
+        )
+
+    return (
+        f"Listo. Actualicé la rutina "
+        f"#{actualizada[0]}: {actualizada[1]} "
+        f"— {frecuencia_texto} "
+        f"a las {actualizada[4]}."
+    )
+
+
+
+def es_eliminacion_rutina(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return (
+        "rutina" in texto
+        and any(
+            expresion in texto
+            for expresion in (
+                "elimina",
+                "eliminar",
+                "borra",
+                "borrar",
+                "cancela",
+                "cancelar",
+                "quita",
+                "quitar",
+            )
+        )
+    )
+
+
+def eliminar_rutina_desde_mensaje(
+    mensaje
+):
+    rutina = buscar_rutina_desde_mensaje(
+        mensaje
+    )
+
+    if not rutina:
+
+        return (
+            "No pude identificar qué rutina "
+            "querés eliminar."
+        )
+
+    estado, _ = eliminar_rutina(
+        rutina[0]
+    )
+
+    if estado == "ya_eliminada":
+
+        return (
+            f"La rutina #{rutina[0]}: "
+            f"{rutina[1]} ya estaba eliminada."
+        )
+
+    if estado != "eliminada":
+
+        return (
+            "No pude eliminar esa rutina."
+        )
+
+    return (
+        f"Listo. Eliminé la rutina "
+        f"#{rutina[0]}: {rutina[1]}."
+    )
+
+
+def es_auditoria_rutinas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    habla_de_rutinas = (
+        "rutina" in texto
+        or "rutinas" in texto
+    )
+
+    revision = any(
+        expresion in texto
+        for expresion in (
+            "revisa",
+            "revisar",
+            "verifica",
+            "verificar",
+            "audita",
+            "auditar",
+            "controla",
+            "controlar",
+            "comproba",
+            "comprobar",
+            "sincronizacion",
+            "integridad",
+        )
+    )
+
+    return (
+        habla_de_rutinas
+        and revision
+    )
+
+
+def revisar_y_limpiar_rutinas():
+    rutinas = obtener_rutinas()
+
+    if not rutinas:
+
+        return (
+            "No hay rutinas recurrentes para revisar."
+        )
+
+    corregidas = []
+    pausadas = []
+    advertencias = []
+
+    claves_vistas = {}
+
+    for rutina in rutinas:
+
+        (
+            rutina_id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora,
+            estado,
+            ultimo_disparo,
+        ) = rutina
+
+        # Estado inválido: la pausamos por seguridad.
+        if estado not in (
+            "activa",
+            "pausada",
+        ):
+
+            resultado, _ = cambiar_estado_rutina(
+                rutina_id,
+                "pausada"
+            )
+
+            if resultado == "actualizada":
+                pausadas.append(
+                    (
+                        rutina_id,
+                        "tenía un estado inválido",
+                    )
+                )
+
+            continue
+
+        # Frecuencia inválida: no sabemos cuándo ejecutarla.
+        if frecuencia not in (
+            "diaria",
+            "semanal",
+        ):
+
+            resultado, _ = cambiar_estado_rutina(
+                rutina_id,
+                "pausada"
+            )
+
+            if resultado == "actualizada":
+                pausadas.append(
+                    (
+                        rutina_id,
+                        "tenía una frecuencia inválida",
+                    )
+                )
+
+            continue
+
+        # Hora inválida: la pausamos para evitar ejecuciones erróneas.
+        try:
+            datetime.strptime(
+                hora,
+                "%H:%M"
+            )
+
+        except (TypeError, ValueError):
+
+            resultado, _ = cambiar_estado_rutina(
+                rutina_id,
+                "pausada"
+            )
+
+            if resultado == "actualizada":
+                pausadas.append(
+                    (
+                        rutina_id,
+                        "tenía un horario inválido",
+                    )
+                )
+
+            continue
+
+        # Una rutina diaria no necesita día de semana.
+        if (
+            frecuencia == "diaria"
+            and dia_semana is not None
+        ):
+
+            resultado, _ = modificar_rutina(
+                rutina_id,
+                frecuencia="diaria",
+                dia_semana=None,
+            )
+
+            if resultado == "actualizada":
+                corregidas.append(
+                    (
+                        rutina_id,
+                        "eliminé un día semanal sobrante",
+                    )
+                )
+
+                dia_semana = None
+
+        # Una semanal sí necesita un día válido.
+        if frecuencia == "semanal":
+
+            if dia_semana not in DIAS_SEMANA_RUTINA:
+
+                resultado, _ = cambiar_estado_rutina(
+                    rutina_id,
+                    "pausada"
+                )
+
+                if resultado == "actualizada":
+                    pausadas.append(
+                        (
+                            rutina_id,
+                            "le faltaba un día semanal válido",
+                        )
+                    )
+
+                continue
+
+        # Duplicados exactos: informamos, pero no eliminamos solos.
+        clave = (
+            normalizar_texto(titulo),
+            frecuencia,
+            dia_semana,
+            hora,
+        )
+
+        if clave in claves_vistas:
+
+            advertencias.append(
+                (
+                    rutina_id,
+                    claves_vistas[clave],
+                )
+            )
+
+        else:
+
+            claves_vistas[clave] = rutina_id
+
+    if (
+        not corregidas
+        and not pausadas
+        and not advertencias
+    ):
+
+        cantidad = len(
+            rutinas
+        )
+
+        return (
+            f"Rutinas correctas. Revisé {cantidad} "
+            f"{'rutina' if cantidad == 1 else 'rutinas'} "
+            f"y no encontré inconsistencias."
+        )
+
+    lineas = []
+
+    if corregidas:
+
+        lineas.append(
+            f"Corregí {len(corregidas)} "
+            f"{'rutina' if len(corregidas) == 1 else 'rutinas'}:"
+        )
+
+        for rutina_id, detalle in corregidas:
+            lineas.append(
+                f"- Rutina #{rutina_id}: {detalle}."
+            )
+
+    if pausadas:
+
+        if lineas:
+            lineas.append("")
+
+        lineas.append(
+            f"Pausé {len(pausadas)} "
+            f"{'rutina' if len(pausadas) == 1 else 'rutinas'} "
+            f"por seguridad:"
+        )
+
+        for rutina_id, detalle in pausadas:
+            lineas.append(
+                f"- Rutina #{rutina_id}: {detalle}."
+            )
+
+    if advertencias:
+
+        if lineas:
+            lineas.append("")
+
+        lineas.append(
+            f"Encontré {len(advertencias)} "
+            f"{'posible duplicado' if len(advertencias) == 1 else 'posibles duplicados'}:"
+        )
+
+        for rutina_id, original_id in advertencias:
+            lineas.append(
+                f"- Rutina #{rutina_id} parece duplicar "
+                f"a la rutina #{original_id}."
+            )
+
+        lineas.append(
+            "No eliminé duplicados automáticamente."
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def mostrar_rutinas():
+    rutinas = obtener_rutinas()
+
+    if not rutinas:
+
+        return (
+            "No tenés rutinas recurrentes activas."
+        )
+
+    lineas = [
+        "Tus rutinas recurrentes son:"
+    ]
+
+    for rutina in rutinas:
+
+        if rutina[2] == "diaria":
+
+            frecuencia = "todos los días"
+
+        elif rutina[2] == "semanal":
+
+            frecuencia = (
+                f"todos los {rutina[3]}"
+            )
+
+        else:
+
+            frecuencia = rutina[2]
+
+        estado_texto = (
+            "activa"
+            if rutina[5] == "activa"
+            else "pausada"
+        )
+
+        lineas.append(
+            f"{rutina[0]}. {rutina[1]} "
+            f"— {frecuencia} "
+            f"a las {rutina[4]} "
+            f"— {estado_texto}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def es_consulta_rutinas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        expresion in texto
+        for expresion in (
+            "que rutinas tengo",
+            "mis rutinas",
+            "rutinas recurrentes",
+            "mostrame mis rutinas",
+            "mostra mis rutinas",
+        )
     )
 
 
@@ -6362,6 +7319,8 @@ def agenda_semana():
     return "\n".join(
         lineas
     )
+
+
 
 
 # ==========================================================
@@ -7007,6 +7966,64 @@ def procesar_comandos_directos(
     ):
 
         return revisar_sincronizacion_eventos()
+
+    # ======================================================
+    # RUTINAS RECURRENTES
+    # Deben resolverse antes que los recordatorios normales,
+    # para que "todos los días..." no cree un aviso único.
+    # ======================================================
+
+    if es_auditoria_rutinas(
+        mensaje
+    ):
+
+        return revisar_y_limpiar_rutinas()
+
+    if es_eliminacion_rutina(
+        mensaje
+    ):
+
+        return eliminar_rutina_desde_mensaje(
+            mensaje
+        )
+
+    if es_pausa_rutina(
+        mensaje
+    ):
+
+        return pausar_rutina_desde_mensaje(
+            mensaje
+        )
+
+    if es_reanudacion_rutina(
+        mensaje
+    ):
+
+        return reanudar_rutina_desde_mensaje(
+            mensaje
+        )
+
+    if es_edicion_rutina(
+        mensaje
+    ):
+
+        return editar_rutina_desde_mensaje(
+            mensaje
+        )
+
+    if es_consulta_rutinas(
+        mensaje
+    ):
+
+        return mostrar_rutinas()
+
+    if es_creacion_rutina(
+        mensaje
+    ):
+
+        return crear_rutina_desde_mensaje(
+            mensaje
+        )
 
     # ======================================================
     # GESTIÓN AVANZADA DE AVISOS
@@ -7884,6 +8901,10 @@ print("🧩 Cambio combinado prioridad + fecha: activo")
 print("🛡️ Prioridad de órdenes combinadas sobre contexto: activa")
 print("🔥 Orden inteligente de tareas por urgencia: activo")
 print("🛡️ Consultas de urgencia protegidas frente a cambios de prioridad: activas")
+print("🔁 Rutinas recurrentes: creación y consulta activas")
+print("⏰ Ejecución automática de rutinas: integrada al motor")
+print("🎛️ Pausa, reanudación y edición de rutinas: activas")
+print("🧪 Auditoría, limpieza y eliminación de rutinas: activas")
 print()
 print("Escribí 'salir' para terminar.")
 print()

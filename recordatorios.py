@@ -60,6 +60,33 @@ def crear_tabla_recordatorios():
             ADD COLUMN tarea_id INTEGER
         """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rutinas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            frecuencia TEXT NOT NULL,
+            dia_semana TEXT,
+            hora TEXT NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'activa',
+            ultimo_disparo TEXT,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    columnas_rutinas = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(rutinas)"
+        ).fetchall()
+    }
+
+    if "ultimo_disparo" not in columnas_rutinas:
+        cursor.execute("""
+            ALTER TABLE rutinas
+            ADD COLUMN ultimo_disparo TEXT
+        """)
+
     conexion.commit()
     conexion.close()
 
@@ -702,6 +729,194 @@ def cancelar_recordatorio(
 
 
 # ==========================================================
+# RUTINAS RECURRENTES
+# ==========================================================
+
+DIAS_SEMANA_RUTINA = {
+    0: "lunes",
+    1: "martes",
+    2: "miercoles",
+    3: "jueves",
+    4: "viernes",
+    5: "sabado",
+    6: "domingo",
+}
+
+
+def obtener_rutinas_activas():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            frecuencia,
+            dia_semana,
+            hora,
+            estado,
+            ultimo_disparo
+        FROM rutinas
+        WHERE estado = 'activa'
+        ORDER BY id ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def marcar_rutina_disparada(
+    rutina_id,
+    clave_disparo
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE rutinas
+        SET ultimo_disparo = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'activa'
+    """, (
+        clave_disparo,
+        rutina_id,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+
+def rutina_debe_dispararse(
+    rutina,
+    ahora
+):
+    (
+        rutina_id,
+        titulo,
+        frecuencia,
+        dia_semana,
+        hora,
+        estado,
+        ultimo_disparo,
+    ) = rutina
+
+    try:
+        hora_objetivo = datetime.strptime(
+            hora,
+            "%H:%M"
+        ).time()
+
+    except (TypeError, ValueError):
+        return (
+            False,
+            None
+        )
+
+    momento_objetivo = ahora.replace(
+        hour=hora_objetivo.hour,
+        minute=hora_objetivo.minute,
+        second=0,
+        microsecond=0,
+    )
+
+    # El motor revisa cada 15 segundos. Permitimos una pequeña ventana
+    # de gracia para reinicios o demoras, pero evitamos disparar una
+    # rutina varias horas tarde al iniciar Hermes.
+    segundos_de_atraso = (
+        ahora
+        - momento_objetivo
+    ).total_seconds()
+
+    if segundos_de_atraso < 0:
+        return (
+            False,
+            None
+        )
+
+    if segundos_de_atraso > 300:
+        return (
+            False,
+            None
+        )
+
+    if frecuencia == "diaria":
+
+        clave_disparo = (
+            f"diaria:{ahora.date().isoformat()}"
+        )
+
+    elif frecuencia == "semanal":
+
+        dia_actual = DIAS_SEMANA_RUTINA.get(
+            ahora.weekday()
+        )
+
+        if dia_actual != dia_semana:
+            return (
+                False,
+                None
+            )
+
+        clave_disparo = (
+            f"semanal:{ahora.date().isoformat()}"
+        )
+
+    else:
+        return (
+            False,
+            None
+        )
+
+    if ultimo_disparo == clave_disparo:
+        return (
+            False,
+            None
+        )
+
+    return (
+        True,
+        clave_disparo
+    )
+
+
+def revisar_rutinas():
+    ahora = datetime.now()
+
+    for rutina in obtener_rutinas_activas():
+
+        debe_dispararse, clave_disparo = rutina_debe_dispararse(
+            rutina,
+            ahora
+        )
+
+        if not debe_dispararse:
+            continue
+
+        rutina_id = rutina[0]
+        titulo = rutina[1]
+
+        enviar_notificacion(
+            titulo,
+            titulo
+        )
+
+        marcar_rutina_disparada(
+            rutina_id,
+            clave_disparo
+        )
+
+        print(
+            f"🔁 Rutina #{rutina_id}: "
+            f"{titulo}",
+            flush=True
+        )
+
+
+# ==========================================================
 # DISPARO
 # ==========================================================
 
@@ -835,6 +1050,9 @@ def ejecutar_motor():
         f"{INTERVALO_REVISION} segundos."
     )
     print(
+        "Rutinas recurrentes: activas."
+    )
+    print(
         "Ctrl + C para detener."
     )
     print()
@@ -843,6 +1061,7 @@ def ejecutar_motor():
 
         try:
             revisar_recordatorios()
+            revisar_rutinas()
 
             time.sleep(
                 INTERVALO_REVISION
