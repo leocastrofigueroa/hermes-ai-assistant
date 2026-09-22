@@ -87,6 +87,46 @@ def crear_base():
     """)
 
     # ------------------------------------------------------
+    # NOTAS
+    # ------------------------------------------------------
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            contenido TEXT NOT NULL DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'activa',
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_notas_estado_id
+        ON notas (estado, id)
+    """)
+
+    columnas_notas = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(notas)"
+        ).fetchall()
+    }
+
+    if "categoria" not in columnas_notas:
+        cursor.execute("""
+            ALTER TABLE notas
+            ADD COLUMN categoria TEXT NOT NULL DEFAULT 'general'
+        """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_notas_categoria_estado
+        ON notas (categoria, estado, id)
+    """)
+
+    # ------------------------------------------------------
     # TAREAS
     # ------------------------------------------------------
 
@@ -720,6 +760,371 @@ def reparar_contexto_conversacional_db():
     return {
         "mensajes_eliminados": eliminados,
         "resumen_recortado": resumen_recortado,
+    }
+
+
+
+
+# ==========================================================
+# NOTAS
+# ==========================================================
+
+def crear_nota(
+    titulo,
+    contenido="",
+    categoria="general"
+):
+    titulo = str(
+        titulo or ""
+    ).strip()
+
+    contenido = str(
+        contenido or ""
+    ).strip()
+
+    categoria = str(
+        categoria or "general"
+    ).strip().lower()
+
+    if not titulo:
+        raise ValueError(
+            "La nota necesita un título."
+        )
+
+    if not categoria:
+        categoria = "general"
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        INSERT INTO notas (
+            titulo,
+            contenido,
+            estado,
+            categoria
+        )
+        VALUES (?, ?, 'activa', ?)
+    """, (
+        titulo,
+        contenido,
+        categoria,
+    ))
+
+    nota_id = cursor.lastrowid
+
+    conexion.commit()
+    conexion.close()
+
+    return nota_id
+
+
+def obtener_notas_activas(
+    categoria=None
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    if categoria:
+        cursor.execute("""
+            SELECT
+                id,
+                titulo,
+                contenido,
+                estado,
+                fecha_creacion,
+                fecha_actualizacion,
+                categoria
+            FROM notas
+            WHERE estado = 'activa'
+              AND categoria = ?
+            ORDER BY id DESC
+        """, (
+            str(categoria).strip().lower(),
+        ))
+    else:
+        cursor.execute("""
+            SELECT
+                id,
+                titulo,
+                contenido,
+                estado,
+                fecha_creacion,
+                fecha_actualizacion,
+                categoria
+            FROM notas
+            WHERE estado = 'activa'
+            ORDER BY categoria ASC, id DESC
+        """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def obtener_nota_por_id(
+    nota_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            contenido,
+            estado,
+            fecha_creacion,
+            fecha_actualizacion,
+            categoria
+        FROM notas
+        WHERE id = ?
+        LIMIT 1
+    """, (
+        int(nota_id),
+    ))
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
+def modificar_nota(
+    nota_id,
+    titulo=None,
+    contenido=None,
+    categoria=None
+):
+    actual = obtener_nota_por_id(
+        nota_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[3] != "activa":
+        return (
+            "no_activa",
+            nota_id
+        )
+
+    titulo_final = (
+        str(titulo).strip()
+        if titulo is not None
+        else actual[1]
+    )
+
+    contenido_final = (
+        str(contenido).strip()
+        if contenido is not None
+        else actual[2]
+    )
+
+    categoria_actual = (
+        actual[6]
+        if len(actual) > 6 and actual[6]
+        else "general"
+    )
+
+    categoria_final = (
+        str(categoria).strip().lower()
+        if categoria is not None
+        else categoria_actual
+    )
+
+    if not titulo_final:
+        titulo_final = actual[1]
+
+    if not categoria_final:
+        categoria_final = "general"
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE notas
+        SET
+            titulo = ?,
+            contenido = ?,
+            categoria = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'activa'
+    """, (
+        titulo_final,
+        contenido_final,
+        categoria_final,
+        int(nota_id),
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizada",
+        nota_id
+    )
+
+
+def eliminar_nota(
+    nota_id
+):
+    actual = obtener_nota_por_id(
+        nota_id
+    )
+
+    if not actual:
+        return (
+            "no_existe",
+            None
+        )
+
+    if actual[3] != "activa":
+        return (
+            "ya_eliminada",
+            nota_id
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE notas
+        SET
+            estado = 'eliminada',
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'activa'
+    """, (
+        int(nota_id),
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "eliminada",
+        nota_id
+    )
+
+
+
+
+def obtener_categorias_notas():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            categoria,
+            COUNT(*)
+        FROM notas
+        WHERE estado = 'activa'
+        GROUP BY categoria
+        ORDER BY categoria ASC
+    """)
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+
+
+def auditar_notas_db():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    total = cursor.execute("""
+        SELECT COUNT(*)
+        FROM notas
+    """).fetchone()[0]
+
+    activas = cursor.execute("""
+        SELECT COUNT(*)
+        FROM notas
+        WHERE estado = 'activa'
+    """).fetchone()[0]
+
+    eliminadas = cursor.execute("""
+        SELECT COUNT(*)
+        FROM notas
+        WHERE estado = 'eliminada'
+    """).fetchone()[0]
+
+    estados_invalidos = cursor.execute("""
+        SELECT COUNT(*)
+        FROM notas
+        WHERE estado NOT IN ('activa', 'eliminada')
+    """).fetchone()[0]
+
+    titulos_vacios = cursor.execute("""
+        SELECT COUNT(*)
+        FROM notas
+        WHERE TRIM(COALESCE(titulo, '')) = ''
+    """).fetchone()[0]
+
+    categorias_vacias = cursor.execute("""
+        SELECT COUNT(*)
+        FROM notas
+        WHERE TRIM(COALESCE(categoria, '')) = ''
+    """).fetchone()[0]
+
+    conexion.close()
+
+    return {
+        "total": int(total or 0),
+        "activas": int(activas or 0),
+        "eliminadas": int(eliminadas or 0),
+        "estados_invalidos": int(estados_invalidos or 0),
+        "titulos_vacios": int(titulos_vacios or 0),
+        "categorias_vacias": int(categorias_vacias or 0),
+    }
+
+
+def limpiar_notas_db():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE notas
+        SET categoria = 'general'
+        WHERE TRIM(COALESCE(categoria, '')) = ''
+    """)
+
+    categorias_reparadas = max(
+        0,
+        int(cursor.rowcount or 0),
+    )
+
+    cursor.execute("""
+        UPDATE notas
+        SET estado = 'eliminada',
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE estado NOT IN ('activa', 'eliminada')
+           OR TRIM(COALESCE(titulo, '')) = ''
+    """)
+
+    notas_marcadas = max(
+        0,
+        int(cursor.rowcount or 0),
+    )
+
+    conexion.commit()
+    conexion.close()
+
+    return {
+        "categorias_reparadas": categorias_reparadas,
+        "notas_marcadas_eliminadas": notas_marcadas,
     }
 
 

@@ -21,6 +21,14 @@ from memoria import (
     limpiar_resumen_contexto,
     auditar_contexto_conversacional_db,
     reparar_contexto_conversacional_db,
+    crear_nota,
+    obtener_notas_activas,
+    obtener_nota_por_id,
+    modificar_nota,
+    eliminar_nota,
+    obtener_categorias_notas,
+    auditar_notas_db,
+    limpiar_notas_db,
     crear_tarea,
     obtener_tareas_pendientes,
     obtener_tareas_por_fecha,
@@ -719,6 +727,658 @@ def limpiar_contexto_conversacional_desde_hermes():
         "Listo. Limpié el contexto conversacional reciente "
         f"({cantidad} mensajes). La memoria permanente no fue modificada."
     )
+
+
+# ==========================================================
+# NOTAS
+# ==========================================================
+
+def es_creacion_nota(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        "anota ",
+        "anota que ",
+        "crea una nota ",
+        "crea una nota que ",
+        "guarda una nota ",
+        "guardame una nota ",
+        "guardá una nota ",
+        "nota: ",
+    )
+
+    return any(
+        texto.startswith(
+            normalizar_texto(patron)
+        )
+        for patron in patrones
+    )
+
+
+def extraer_contenido_nota(
+    mensaje
+):
+    texto_original = str(
+        mensaje or ""
+    ).strip()
+
+    patrones = (
+        r"^\s*anot[áa]\s+(?:que\s+)?",
+        r"^\s*cre[áa]\s+una\s+nota\s+(?:que\s+)?",
+        r"^\s*guard[áa](?:me)?\s+una\s+nota\s+(?:que\s+)?",
+        r"^\s*nota\s*:\s*",
+    )
+
+    contenido = texto_original
+
+    for patron in patrones:
+        nuevo = re.sub(
+            patron,
+            "",
+            contenido,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        if nuevo != contenido:
+            contenido = nuevo.strip()
+            break
+
+    return contenido.strip()
+
+
+def extraer_categoria_nota(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    coincidencia = re.search(
+        r"\b(?:en|categoria|categoría)\s+"
+        r"(?:la\s+categoria\s+|la\s+categoría\s+)?"
+        r"([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_-]+)\s*$",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    if not coincidencia:
+        return "general"
+
+    categoria = coincidencia.group(1).strip().lower()
+
+    return categoria or "general"
+
+
+def quitar_categoria_del_contenido(
+    contenido
+):
+    return re.sub(
+        r"\s+\b(?:en|categoria|categoría)\s+"
+        r"(?:la\s+categoria\s+|la\s+categoría\s+)?"
+        r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_-]+\s*$",
+        "",
+        str(contenido),
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def crear_nota_desde_mensaje(
+    mensaje
+):
+    categoria = extraer_categoria_nota(
+        mensaje
+    )
+
+    contenido = extraer_contenido_nota(
+        mensaje
+    )
+
+    contenido = quitar_categoria_del_contenido(
+        contenido
+    )
+
+    if not contenido:
+        return (
+            "Decime qué querés anotar."
+        )
+
+    titulo = contenido
+
+    if len(titulo) > 70:
+        titulo = titulo[:67].rstrip() + "..."
+
+    nota_id = crear_nota(
+        titulo,
+        contenido,
+        categoria,
+    )
+
+    return (
+        f"Listo. Guardé la nota #{nota_id} "
+        f"en la categoría {categoria}: {titulo}"
+    )
+
+
+def es_edicion_nota(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"\b(?:edita|editar|modifica|modificar|cambia|cambiar)\s+"
+        r"(?:la\s+)?nota\s+#?\d+\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto
+        )
+        for patron in patrones
+    )
+
+
+def editar_nota_desde_mensaje(
+    mensaje
+):
+    coincidencia_id = re.search(
+        r"\bnota\s+#?(\d+)\b",
+        normalizar_texto(
+            mensaje
+        ),
+    )
+
+    if not coincidencia_id:
+        return (
+            "Decime qué nota querés editar."
+        )
+
+    nota_id = int(
+        coincidencia_id.group(1)
+    )
+
+    nota = obtener_nota_por_id(
+        nota_id
+    )
+
+    if not nota or nota[3] != "activa":
+        return (
+            f"No encontré una nota activa #{nota_id}."
+        )
+
+    contenido_nuevo = re.sub(
+        r"^.*?\bnota\s+#?\d+\b",
+        "",
+        str(mensaje),
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    contenido_nuevo = re.sub(
+        r"^(?:por|a|como|que\s+diga|y\s+pone|y\s+poné|y\s+pon)\s+",
+        "",
+        contenido_nuevo,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if not contenido_nuevo:
+        return (
+            "Decime cuál querés que sea el nuevo contenido."
+        )
+
+    titulo_nuevo = contenido_nuevo
+
+    if len(titulo_nuevo) > 70:
+        titulo_nuevo = (
+            titulo_nuevo[:67].rstrip()
+            + "..."
+        )
+
+    estado, _ = modificar_nota(
+        nota_id,
+        titulo=titulo_nuevo,
+        contenido=contenido_nuevo,
+    )
+
+    if estado == "actualizada":
+        return (
+            f"Listo. Actualicé la nota #{nota_id}: "
+            f"{titulo_nuevo}"
+        )
+
+    return (
+        f"No pude actualizar la nota #{nota_id}."
+    )
+
+
+def es_eliminacion_nota(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"\b(?:elimina|eliminar|borra|borrar|quita|quitar)\s+"
+        r"(?:la\s+)?nota\s+#?\d+\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto
+        )
+        for patron in patrones
+    )
+
+
+def eliminar_nota_desde_mensaje(
+    mensaje
+):
+    coincidencia = re.search(
+        r"\bnota\s+#?(\d+)\b",
+        normalizar_texto(
+            mensaje
+        ),
+    )
+
+    if not coincidencia:
+        return (
+            "Decime qué nota querés eliminar."
+        )
+
+    nota_id = int(
+        coincidencia.group(1)
+    )
+
+    estado, _ = eliminar_nota(
+        nota_id
+    )
+
+    if estado == "eliminada":
+        return (
+            f"Listo. Eliminé la nota #{nota_id}."
+        )
+
+    if estado == "ya_eliminada":
+        return (
+            f"La nota #{nota_id} ya estaba eliminada."
+        )
+
+    return (
+        f"No encontré la nota #{nota_id}."
+    )
+
+
+
+
+def es_cambio_categoria_nota(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.search(
+            r"\b(?:move|mover|pasa|pasar|cambia|cambiar)\s+"
+            r"(?:la\s+)?nota\s+#?\d+\b.*\b(?:categoria|categoría|a)\b",
+            texto
+        )
+    )
+
+
+def cambiar_categoria_nota_desde_mensaje(
+    mensaje
+):
+    coincidencia_id = re.search(
+        r"\bnota\s+#?(\d+)\b",
+        normalizar_texto(
+            mensaje
+        ),
+    )
+
+    if not coincidencia_id:
+        return "Decime qué nota querés mover."
+
+    nota_id = int(
+        coincidencia_id.group(1)
+    )
+
+    nota = obtener_nota_por_id(
+        nota_id
+    )
+
+    if not nota or nota[3] != "activa":
+        return f"No encontré una nota activa #{nota_id}."
+
+    coincidencia_categoria = re.search(
+        r"\b(?:categoria|categoría|a)\s+"
+        r"([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_-]+)\s*$",
+        str(mensaje),
+        flags=re.IGNORECASE,
+    )
+
+    if not coincidencia_categoria:
+        return "Decime a qué categoría querés moverla."
+
+    categoria = coincidencia_categoria.group(1).strip().lower()
+
+    modificar_nota(
+        nota_id,
+        categoria=categoria,
+    )
+
+    return (
+        f"Listo. Moví la nota #{nota_id} "
+        f"a la categoría {categoria}."
+    )
+
+
+def es_consulta_categorias_notas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        expresion in texto
+        for expresion in (
+            "categorias de notas",
+            "categorias de mis notas",
+            "que categorias tengo",
+            "que categorias de notas tengo",
+        )
+    )
+
+
+def mostrar_categorias_notas():
+    categorias = obtener_categorias_notas()
+
+    if not categorias:
+        return "No tenés categorías de notas activas."
+
+    lineas = [
+        "Categorías de notas:"
+    ]
+
+    for categoria, cantidad in categorias:
+        lineas.append(
+            f"- {categoria}: {cantidad}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def es_consulta_notas_por_categoria(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.search(
+            r"\bnotas\s+(?:de|en)\s+"
+            r"[a-z0-9ñü_-]+\b",
+            texto
+        )
+    )
+
+
+def mostrar_notas_por_categoria_desde_mensaje(
+    mensaje
+):
+    coincidencia = re.search(
+        r"\bnotas\s+(?:de|en)\s+"
+        r"([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_-]+)\b",
+        str(mensaje),
+        flags=re.IGNORECASE,
+    )
+
+    if not coincidencia:
+        return None
+
+    categoria = coincidencia.group(1).strip().lower()
+
+    notas = obtener_notas_activas(
+        categoria=categoria
+    )
+
+    if not notas:
+        return (
+            f"No tenés notas activas en la categoría {categoria}."
+        )
+
+    lineas = [
+        f"Notas en {categoria}:"
+    ]
+
+    for nota in notas:
+        lineas.append(
+            f"#{nota[0]} — {nota[1]}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+
+
+def es_auditoria_notas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "audita las notas",
+            "auditar las notas",
+            "revisa las notas",
+            "revisar las notas",
+            "audita el sistema de notas",
+        )
+    )
+
+
+def auditar_notas():
+    datos = auditar_notas_db()
+
+    problemas = []
+
+    if datos["estados_invalidos"]:
+        problemas.append(
+            f'{datos["estados_invalidos"]} estados inválidos'
+        )
+
+    if datos["titulos_vacios"]:
+        problemas.append(
+            f'{datos["titulos_vacios"]} títulos vacíos'
+        )
+
+    if datos["categorias_vacias"]:
+        problemas.append(
+            f'{datos["categorias_vacias"]} categorías vacías'
+        )
+
+    if not problemas:
+        return (
+            "Las notas están correctas. "
+            f'Activas: {datos["activas"]}. '
+            f'Eliminadas: {datos["eliminadas"]}.'
+        )
+
+    return (
+        "Encontré problemas en las notas: "
+        + "; ".join(problemas)
+        + "."
+    )
+
+
+def es_limpieza_notas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "limpia las notas",
+            "limpiar las notas",
+            "repara las notas",
+            "reparar las notas",
+            "corrige las notas",
+            "corregir las notas",
+        )
+    )
+
+
+def limpiar_notas():
+    limpiar_notas_db()
+
+    datos = auditar_notas_db()
+
+    correcto = (
+        datos["estados_invalidos"] == 0
+        and datos["titulos_vacios"] == 0
+        and datos["categorias_vacias"] == 0
+    )
+
+    if correcto:
+        return (
+            "Listo. El sistema de notas quedó limpio y consistente. "
+            f'Activas: {datos["activas"]}. '
+            f'Eliminadas: {datos["eliminadas"]}.'
+        )
+
+    return (
+        "La limpieza terminó, pero todavía hay inconsistencias. "
+        "Ejecutá: Auditá las notas."
+    )
+
+
+
+
+def es_consulta_notas(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    expresiones = (
+        "mis notas",
+        "mostra mis notas",
+        "mostrar mis notas",
+        "lista mis notas",
+        "listar mis notas",
+        "que notas tengo",
+        "que tengo anotado",
+    )
+
+    return any(
+        expresion in texto
+        for expresion in expresiones
+    )
+
+
+def mostrar_notas():
+    notas = obtener_notas_activas()
+
+    if not notas:
+        return "No tenés notas guardadas."
+
+    lineas = [
+        "Notas:"
+    ]
+
+    for nota in notas:
+        nota_id = nota[0]
+        titulo = nota[1]
+        categoria = (
+            nota[6]
+            if len(nota) > 6 and nota[6]
+            else "general"
+        )
+
+        lineas.append(
+            f"#{nota_id} [{categoria}] — {titulo}"
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def es_consulta_nota_por_id(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.search(
+            r"\bnota\s+#?\d+\b",
+            texto
+        )
+    )
+
+
+def mostrar_nota_por_id_desde_mensaje(
+    mensaje
+):
+    coincidencia = re.search(
+        r"\bnota\s+#?(\d+)\b",
+        normalizar_texto(
+            mensaje
+        ),
+    )
+
+    if not coincidencia:
+        return None
+
+    nota_id = int(
+        coincidencia.group(1)
+    )
+
+    nota = obtener_nota_por_id(
+        nota_id
+    )
+
+    if not nota or nota[3] != "activa":
+        return (
+            f"No encontré una nota activa #{nota_id}."
+        )
+
+    categoria = (
+        nota[6]
+        if len(nota) > 6 and nota[6]
+        else "general"
+    )
+
+    return (
+        f"Nota #{nota[0]} [{categoria}] — {nota[1]}\n"
+        f"{nota[2]}"
+    )
+
+
 
 
 PROMPT_SISTEMA = """
@@ -11330,6 +11990,92 @@ def procesar_comandos_directos(
         mensaje
     )
 
+    if es_auditoria_notas(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return auditar_notas()
+
+    if es_limpieza_notas(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return limpiar_notas()
+
+    if es_cambio_categoria_nota(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return cambiar_categoria_nota_desde_mensaje(
+            mensaje
+        )
+
+    if es_consulta_categorias_notas(
+        mensaje
+    ):
+        return mostrar_categorias_notas()
+
+    if es_consulta_notas_por_categoria(
+        mensaje
+    ):
+        respuesta_categoria = mostrar_notas_por_categoria_desde_mensaje(
+            mensaje
+        )
+
+        if respuesta_categoria is not None:
+            return respuesta_categoria
+
+    if es_edicion_nota(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return editar_nota_desde_mensaje(
+            mensaje
+        )
+
+    if es_eliminacion_nota(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return eliminar_nota_desde_mensaje(
+            mensaje
+        )
+
+    if es_creacion_nota(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return crear_nota_desde_mensaje(
+            mensaje
+        )
+
+    if es_consulta_nota_por_id(
+        mensaje
+    ):
+        respuesta_nota = mostrar_nota_por_id_desde_mensaje(
+            mensaje
+        )
+
+        if respuesta_nota is not None:
+            return respuesta_nota
+
+    if es_consulta_notas(
+        mensaje
+    ):
+        return mostrar_notas()
+
     if es_referencia_natural_corta(
         mensaje
     ):
@@ -12651,6 +13397,7 @@ print("🧠 Contexto conversacional profundo: activo")
 print("🔗 Referencias naturales de conversación: activas")
 print("🗜️ Compresión automática del contexto: activa")
 print("🧪 Auditoría y limpieza del contexto: activas")
+print("📝 Sistema de notas: creación, edición, categorías y auditoría activas")
 print()
 print("Escribí 'salir' para terminar.")
 print()
