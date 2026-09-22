@@ -3,6 +3,7 @@ import re
 import unicodedata
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import requests
 
@@ -7291,6 +7292,872 @@ def procesar_confirmacion_pendiente(
 # MEMORIA
 # ==========================================================
 
+def es_listado_ruta_local(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"^(?:lista|listar|mostra|mostrar|mostrame)\s+(?:los\s+)?archivos\b",
+        r"^(?:lista|listar|mostra|mostrar|mostrame)\s+(?:las\s+)?carpetas\b",
+        r"^(?:lista|listar|mostra|mostrar|mostrame)\s+(?:el\s+)?contenido\s+de\b",
+        r"^(?:que|qué)\s+hay\s+en\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto,
+        )
+        for patron in patrones
+    )
+
+
+def extraer_ruta_listado_local(
+    mensaje
+):
+    texto_original = str(
+        mensaje or ""
+    ).strip()
+
+    texto_normalizado = normalizar_texto(
+        texto_original
+    )
+
+    comandos_sin_ruta = (
+        "mostrame los archivos",
+        "mostra los archivos",
+        "mostrar los archivos",
+        "lista los archivos",
+        "listar los archivos",
+        "mostrame las carpetas",
+        "mostra las carpetas",
+        "mostrar las carpetas",
+        "lista las carpetas",
+        "listar las carpetas",
+    )
+
+    if texto_normalizado in comandos_sin_ruta:
+        return "."
+
+    patrones = (
+        r"^\s*(?:list[áa]|listar|mostr[áa]|mostrar|mostrame)\s+(?:los\s+)?archivos\s+(?:de|en)\s+",
+        r"^\s*(?:list[áa]|listar|mostr[áa]|mostrar|mostrame)\s+(?:las\s+)?carpetas\s+(?:de|en)\s+",
+        r"^\s*(?:list[áa]|listar|mostr[áa]|mostrar|mostrame)\s+(?:el\s+)?contenido\s+de\s+",
+        r"^\s*(?:qu[ée])\s+hay\s+en\s+",
+    )
+
+    ruta = texto_original
+
+    for patron in patrones:
+        nuevo = re.sub(
+            patron,
+            "",
+            ruta,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        if nuevo != ruta:
+            ruta = nuevo.strip()
+            break
+
+    ruta = ruta.strip().strip(
+        "\"'"
+    )
+
+    if not ruta or ruta == texto_original:
+        return "."
+
+    return ruta
+
+
+def listar_ruta_local(
+    ruta
+):
+    path = resolver_ruta_archivo_local(
+        ruta
+    )
+
+    if path is None:
+        path = Path.cwd()
+
+    if not path.exists():
+        return (
+            f"No encontré la ruta: {path}"
+        )
+
+    if not path.is_dir():
+        return (
+            f"Esa ruta no es una carpeta: {path}"
+        )
+
+    try:
+        elementos = sorted(
+            path.iterdir(),
+            key=lambda item: (
+                not item.is_dir(),
+                item.name.lower(),
+            ),
+        )
+    except OSError as error:
+        return (
+            f"No pude listar la carpeta: {error}"
+        )
+
+    if not elementos:
+        return (
+            f"La carpeta está vacía: {path}"
+        )
+
+    lineas = [
+        f"Contenido de {path}:"
+    ]
+
+    for item in elementos[:100]:
+        tipo = (
+            "[carpeta]"
+            if item.is_dir()
+            else "[archivo]"
+        )
+
+        lineas.append(
+            f"{tipo} {item.name}"
+        )
+
+    if len(elementos) > 100:
+        lineas.append(
+            f"... y {len(elementos) - 100} elementos más."
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def listar_ruta_local_desde_mensaje(
+    mensaje
+):
+    ruta = extraer_ruta_listado_local(
+        mensaje
+    )
+
+    return listar_ruta_local(
+        ruta
+    )
+
+
+ARCHIVOS_PROTEGIDOS_HERMES = {
+    "hermes.py",
+    "memoria.py",
+    "recordatorios.py",
+    "hermes.db",
+    ".gitignore",
+}
+
+
+CARPETAS_PROTEGIDAS_HERMES = {
+    ".git",
+    ".venv",
+    ".vscode",
+    "__pycache__",
+}
+
+
+def ruta_dentro_del_proyecto(
+    path
+):
+    try:
+        raiz = Path.cwd().resolve()
+        objetivo = path.resolve()
+        objetivo.relative_to(
+            raiz
+        )
+        return True
+    except (
+        ValueError,
+        OSError,
+    ):
+        return False
+
+
+def es_ruta_protegida(
+    path
+):
+    try:
+        partes = set(
+            path.resolve().parts
+        )
+    except OSError:
+        partes = set(
+            path.parts
+        )
+
+    if path.name in ARCHIVOS_PROTEGIDOS_HERMES:
+        return True
+
+    return any(
+        carpeta in partes
+        for carpeta in CARPETAS_PROTEGIDAS_HERMES
+    )
+
+
+def validar_ruta_escritura_local(
+    path
+):
+    if not ruta_dentro_del_proyecto(
+        path
+    ):
+        return (
+            False,
+            "Por seguridad, solo puedo crear, editar o eliminar "
+            "archivos dentro de la carpeta del proyecto Hermes.",
+        )
+
+    if es_ruta_protegida(
+        path
+    ):
+        return (
+            False,
+            f"La ruta está protegida y no se puede modificar: {path}",
+        )
+
+    return (
+        True,
+        None,
+    )
+
+
+def es_auditoria_archivos_locales(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "audita los archivos",
+            "auditar los archivos",
+            "audita archivos locales",
+            "revisa la seguridad de archivos",
+            "revisar la seguridad de archivos",
+            "audita la seguridad de archivos",
+        )
+    )
+
+
+def auditar_archivos_locales():
+    raiz = Path.cwd().resolve()
+
+    prueba_fuera = (
+        raiz.parent
+        / "hermes_prueba_seguridad.txt"
+    )
+
+    prueba_protegida = (
+        raiz
+        / "hermes.py"
+    )
+
+    fuera_ok, _ = validar_ruta_escritura_local(
+        prueba_fuera
+    )
+
+    protegida_ok, _ = validar_ruta_escritura_local(
+        prueba_protegida
+    )
+
+    problemas = []
+
+    if fuera_ok:
+        problemas.append(
+            "la protección contra escritura fuera del proyecto falló"
+        )
+
+    if protegida_ok:
+        problemas.append(
+            "la protección de archivos críticos falló"
+        )
+
+    if problemas:
+        return (
+            "Encontré problemas de seguridad en archivos: "
+            + "; ".join(
+                problemas
+            )
+            + "."
+        )
+
+    return (
+        "La seguridad de archivos está correcta. "
+        "Las escrituras fuera del proyecto están bloqueadas "
+        "y los archivos críticos están protegidos."
+    )
+
+
+def es_creacion_archivo_local(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.search(
+            r"^(?:crea|crear|creame)\s+(?:el\s+)?archivo\b",
+            texto,
+        )
+    )
+
+
+def extraer_creacion_archivo_local(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    coincidencia = re.match(
+        r"^\s*(?:cre[áa]|crear|cre[áa]me)\s+(?:el\s+)?archivo\s+"
+        r"(.+?)\s+(?:con|que\s+diga|y\s+pone|y\s+pon[ée])\s+(.+)$",
+        texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if not coincidencia:
+        return None, None
+
+    ruta = coincidencia.group(1).strip().strip(
+        "\"'"
+    )
+
+    contenido = coincidencia.group(2).strip()
+
+    return ruta, contenido
+
+
+def crear_archivo_texto_local(
+    ruta,
+    contenido
+):
+    path = resolver_ruta_archivo_local(
+        ruta
+    )
+
+    if path is None:
+        return "Decime qué archivo querés crear."
+
+    permitido, motivo = validar_ruta_escritura_local(
+        path
+    )
+
+    if not permitido:
+        return motivo
+
+    extension = path.suffix.lower()
+
+    if extension not in EXTENSIONES_TEXTO_PERMITIDAS:
+        return (
+            "Solo puedo crear archivos de texto o código "
+            "con una extensión permitida."
+        )
+
+    if path.name in ARCHIVOS_PROTEGIDOS_HERMES:
+        return (
+            f"No voy a crear ni sobrescribir el archivo protegido "
+            f"{path.name} desde este comando."
+        )
+
+    if path.exists():
+        return (
+            f"El archivo ya existe: {path}. "
+            "Usá un comando de edición si querés modificarlo."
+        )
+
+    try:
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        path.write_text(
+            str(contenido),
+            encoding="utf-8",
+        )
+
+    except OSError as error:
+        return (
+            f"No pude crear el archivo: {error}"
+        )
+
+    return (
+        f"Listo. Creé el archivo: {path}"
+    )
+
+
+def crear_archivo_local_desde_mensaje(
+    mensaje
+):
+    ruta, contenido = extraer_creacion_archivo_local(
+        mensaje
+    )
+
+    if not ruta:
+        return (
+            "Usá, por ejemplo: "
+            "Creá el archivo prueba.txt con hola mundo"
+        )
+
+    return crear_archivo_texto_local(
+        ruta,
+        contenido,
+    )
+
+
+def es_edicion_archivo_local(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.search(
+            r"^(?:edita|editar|modifica|modificar|reemplaza|reemplazar)\s+"
+            r"(?:el\s+)?archivo\b",
+            texto,
+        )
+    )
+
+
+def extraer_edicion_archivo_local(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    coincidencia = re.match(
+        r"^\s*(?:edit[áa]|editar|modific[áa]|modificar|reemplaz[áa]|reemplazar)\s+"
+        r"(?:el\s+)?archivo\s+(.+?)\s+"
+        r"(?:con|por|que\s+diga|y\s+pone|y\s+pon[ée])\s+(.+)$",
+        texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if not coincidencia:
+        return None, None
+
+    ruta = coincidencia.group(1).strip().strip(
+        "\"'"
+    )
+
+    contenido = coincidencia.group(2).strip()
+
+    return ruta, contenido
+
+
+def editar_archivo_texto_local(
+    ruta,
+    contenido
+):
+    path = resolver_ruta_archivo_local(
+        ruta
+    )
+
+    if path is None:
+        return "Decime qué archivo querés editar."
+
+    permitido, motivo = validar_ruta_escritura_local(
+        path
+    )
+
+    if not permitido:
+        return motivo
+
+    if path.name in ARCHIVOS_PROTEGIDOS_HERMES:
+        return (
+            f"No voy a modificar el archivo protegido {path.name} "
+            "desde este comando."
+        )
+
+    if not path.exists():
+        return (
+            f"No encontré el archivo: {path}"
+        )
+
+    if not path.is_file():
+        return (
+            f"Esa ruta no es un archivo: {path}"
+        )
+
+    if path.suffix.lower() not in EXTENSIONES_TEXTO_PERMITIDAS:
+        return (
+            "Solo puedo editar archivos de texto o código "
+            "con una extensión permitida."
+        )
+
+    try:
+        path.write_text(
+            str(contenido),
+            encoding="utf-8",
+        )
+    except OSError as error:
+        return (
+            f"No pude editar el archivo: {error}"
+        )
+
+    return (
+        f"Listo. Actualicé el archivo: {path}"
+    )
+
+
+def editar_archivo_local_desde_mensaje(
+    mensaje
+):
+    ruta, contenido = extraer_edicion_archivo_local(
+        mensaje
+    )
+
+    if not ruta:
+        return (
+            "Usá, por ejemplo: "
+            "Editá el archivo prueba.txt con nuevo contenido"
+        )
+
+    return editar_archivo_texto_local(
+        ruta,
+        contenido,
+    )
+
+
+def es_eliminacion_archivo_local(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.search(
+            r"^(?:elimina|eliminar|borra|borrar)\s+(?:el\s+)?archivo\b",
+            texto,
+        )
+    )
+
+
+def extraer_ruta_eliminacion_archivo_local(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    ruta = re.sub(
+        r"^\s*(?:elimin[áa]|eliminar|borr[áa]|borrar)\s+"
+        r"(?:el\s+)?archivo\s+",
+        "",
+        texto,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    return ruta.strip(
+        "\"'"
+    )
+
+
+def eliminar_archivo_texto_local(
+    ruta
+):
+    path = resolver_ruta_archivo_local(
+        ruta
+    )
+
+    if path is None:
+        return "Decime qué archivo querés eliminar."
+
+    permitido, motivo = validar_ruta_escritura_local(
+        path
+    )
+
+    if not permitido:
+        return motivo
+
+    if path.name in ARCHIVOS_PROTEGIDOS_HERMES:
+        return (
+            f"No voy a eliminar el archivo protegido {path.name}."
+        )
+
+    if not path.exists():
+        return (
+            f"No encontré el archivo: {path}"
+        )
+
+    if not path.is_file():
+        return (
+            f"Esa ruta no es un archivo: {path}"
+        )
+
+    if path.suffix.lower() not in EXTENSIONES_TEXTO_PERMITIDAS:
+        return (
+            "Solo puedo eliminar archivos de texto o código "
+            "con una extensión permitida."
+        )
+
+    try:
+        path.unlink()
+    except OSError as error:
+        return (
+            f"No pude eliminar el archivo: {error}"
+        )
+
+    return (
+        f"Listo. Eliminé el archivo: {path}"
+    )
+
+
+def eliminar_archivo_local_desde_mensaje(
+    mensaje
+):
+    ruta = extraer_ruta_eliminacion_archivo_local(
+        mensaje
+    )
+
+    if not ruta:
+        return (
+            "Decime qué archivo querés eliminar."
+        )
+
+    return eliminar_archivo_texto_local(
+        ruta
+    )
+
+
+EXTENSIONES_TEXTO_PERMITIDAS = {
+    ".txt",
+    ".md",
+    ".py",
+    ".json",
+    ".csv",
+    ".yaml",
+    ".yml",
+    ".log",
+    ".ini",
+    ".toml",
+    ".sql",
+    ".html",
+    ".css",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+}
+
+MAX_BYTES_ARCHIVO_TEXTO = 1024 * 1024
+MAX_CARACTERES_MOSTRAR_ARCHIVO = 12000
+
+
+def es_lectura_archivo_local(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    patrones = (
+        r"^(?:lee|leer|leeme)\s+(?:el\s+)?archivo\b",
+        r"^(?:abre|abrir|abreme)\s+(?:el\s+)?archivo\b",
+        r"^(?:mostra|mostrar|mostrame)\s+(?:el\s+)?archivo\b",
+    )
+
+    return any(
+        re.search(
+            patron,
+            texto,
+        )
+        for patron in patrones
+    )
+
+
+def extraer_ruta_archivo_local(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    patrones = (
+        r"^\s*(?:le[ée]|leer|le[ée]me)\s+(?:el\s+)?archivo\s+",
+        r"^\s*(?:abr[íi]|abrir|abr[íi]me)\s+(?:el\s+)?archivo\s+",
+        r"^\s*(?:mostr[áa]|mostrar|mostrame)\s+(?:el\s+)?archivo\s+",
+    )
+
+    ruta = texto
+
+    for patron in patrones:
+        nuevo = re.sub(
+            patron,
+            "",
+            ruta,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        if nuevo != ruta:
+            ruta = nuevo.strip()
+            break
+
+    ruta = ruta.strip().strip(
+        "\"'"
+    )
+
+    return ruta
+
+
+def resolver_ruta_archivo_local(
+    ruta
+):
+    ruta = str(
+        ruta or ""
+    ).strip()
+
+    if not ruta:
+        return None
+
+    path = Path(
+        ruta
+    ).expanduser()
+
+    if not path.is_absolute():
+        path = Path.cwd() / path
+
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def leer_archivo_texto_local(
+    ruta
+):
+    path = resolver_ruta_archivo_local(
+        ruta
+    )
+
+    if path is None:
+        return (
+            "Decime qué archivo querés leer."
+        )
+
+    if not path.exists():
+        return (
+            f"No encontré el archivo: {path}"
+        )
+
+    if not path.is_file():
+        return (
+            f"Esa ruta no es un archivo: {path}"
+        )
+
+    extension = path.suffix.lower()
+
+    if extension not in EXTENSIONES_TEXTO_PERMITIDAS:
+        return (
+            "Por ahora puedo leer archivos de texto y código "
+            f"compatibles. Extensión no soportada: "
+            f"{extension or 'sin extensión'}."
+        )
+
+    try:
+        tamano = path.stat().st_size
+    except OSError as error:
+        return (
+            f"No pude revisar el archivo: {error}"
+        )
+
+    if tamano > MAX_BYTES_ARCHIVO_TEXTO:
+        return (
+            "El archivo es demasiado grande para esta etapa "
+            f"({tamano} bytes). Límite actual: "
+            f"{MAX_BYTES_ARCHIVO_TEXTO} bytes."
+        )
+
+    contenido = None
+
+    for codificacion in (
+        "utf-8",
+        "utf-8-sig",
+        "latin-1",
+    ):
+        try:
+            contenido = path.read_text(
+                encoding=codificacion
+            )
+            break
+        except UnicodeDecodeError:
+            continue
+        except OSError as error:
+            return (
+                f"No pude leer el archivo: {error}"
+            )
+
+    if contenido is None:
+        return (
+            "No pude interpretar el archivo como texto."
+        )
+
+    contenido = contenido.strip()
+
+    if not contenido:
+        return (
+            f"El archivo {path.name} está vacío."
+        )
+
+    truncado = (
+        len(contenido)
+        > MAX_CARACTERES_MOSTRAR_ARCHIVO
+    )
+
+    if truncado:
+        contenido = contenido[
+            :MAX_CARACTERES_MOSTRAR_ARCHIVO
+        ].rstrip()
+
+    respuesta = (
+        f"Archivo: {path}\n\n"
+        f"{contenido}"
+    )
+
+    if truncado:
+        respuesta += (
+            "\n\n[Contenido recortado para mostrarlo de forma segura.]"
+        )
+
+    return respuesta
+
+
+def leer_archivo_local_desde_mensaje(
+    mensaje
+):
+    ruta = extraer_ruta_archivo_local(
+        mensaje
+    )
+
+    if not ruta:
+        return (
+            "Decime qué archivo querés leer."
+        )
+
+    return leer_archivo_texto_local(
+        ruta
+    )
+
+
 def es_auditoria_busqueda_local(
     mensaje
 ):
@@ -12372,6 +13239,64 @@ def procesar_comandos_directos(
         mensaje
     )
 
+    if es_auditoria_archivos_locales(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return auditar_archivos_locales()
+
+    if es_creacion_archivo_local(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return crear_archivo_local_desde_mensaje(
+            mensaje
+        )
+
+    if es_edicion_archivo_local(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return editar_archivo_local_desde_mensaje(
+            mensaje
+        )
+
+    if es_eliminacion_archivo_local(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return eliminar_archivo_local_desde_mensaje(
+            mensaje
+        )
+
+    if es_listado_ruta_local(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return listar_ruta_local_desde_mensaje(
+            mensaje
+        )
+
+    if es_lectura_archivo_local(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return leer_archivo_local_desde_mensaje(
+            mensaje
+        )
+
     if es_auditoria_busqueda_local(
         mensaje
     ):
@@ -13813,6 +14738,10 @@ print("🔎 Búsqueda de notas por texto: activa")
 print("🧠 Búsqueda en memoria permanente: activa")
 print("🔎 Búsqueda combinada notas + memoria: activa")
 print("🧪 Auditoría de búsqueda local: activa")
+print("📄 Lectura de archivos de texto locales: activa")
+print("📁 Listado de archivos y carpetas locales: activo")
+print("✍️ Creación, edición y eliminación de archivos de texto: activas")
+print("🛡️ Seguridad y auditoría de archivos locales: activas")
 print()
 print("Escribí 'salir' para terminar.")
 print()
