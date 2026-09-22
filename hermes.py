@@ -54,6 +54,10 @@ from recordatorios import (
     reprogramar_recordatorios_de_evento,
     cancelar_recordatorios_de_evento,
     cancelar_recordatorios_de_tarea,
+    obtener_configuracion_resumen_diario,
+    configurar_hora_resumen_diario,
+    obtener_hora_resumen_diario,
+    auditar_configuracion_resumen_diario,
 )
 
 
@@ -528,11 +532,9 @@ def autoriza_creacion_evento_desde_modelo(
     )
 
 
-
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — DESPLAZAMIENTOS RELATIVOS
 # ==========================================================
-
 NUMEROS_TEMPORALES = {
     "un": 1,
     "una": 1,
@@ -692,7 +694,6 @@ def extraer_hora_relativa_avanzada(
     )
 
 
-
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — DÍAS NATURALES
 # ==========================================================
@@ -837,7 +838,6 @@ def extraer_fecha_natural_avanzada(
             )
 
     return None
-
 
 
 # ==========================================================
@@ -1220,11 +1220,9 @@ def fecha_para_mostrar(
     )
 
 
-
 # ==========================================================
 # COMPRENSIÓN TEMPORAL AVANZADA — PARTES DEL DÍA
 # ==========================================================
-
 HORAS_PARTES_DIA = {
     "manana": "09:00",
     "mediodia": "12:00",
@@ -1688,7 +1686,6 @@ def extraer_todas_las_anticipaciones(
     ]
 
 
-
 def es_creacion_evento_natural(
     mensaje
 ):
@@ -1869,7 +1866,6 @@ def crear_evento_natural_desde_mensaje(
     respuesta += "."
 
     return respuesta
-
 
 
 # ==========================================================
@@ -2494,11 +2490,6 @@ def dejar_solo_aviso_desde_mensaje(
         f"{'aviso' if cancelados == 1 else 'avisos'} adicional"
         f"{'' if cancelados == 1 else 'es'}."
     )
-
-
-
-
-
 
 
 # ==========================================================
@@ -4846,7 +4837,6 @@ def procesar_confirmacion_aviso(
     )
 
 
-
 # ==========================================================
 # DURACIÓN DE EVENTOS — CAMBIAR DURACIÓN
 # ==========================================================
@@ -5280,7 +5270,6 @@ def es_cancelacion_evento(
             "borrar",
         )
     )
-
 
 
 def reprogramar_avisos_evento_seguro(
@@ -5832,10 +5821,6 @@ def mostrar_tareas_pendientes():
     )
 
 
-
-
-
-
 # ==========================================================
 # EVENTOS RECURRENTES
 # ==========================================================
@@ -6117,7 +6102,6 @@ def crear_evento_recurrente_desde_mensaje(
     respuesta += "."
 
     return respuesta
-
 
 
 def buscar_evento_recurrente_desde_mensaje(
@@ -7056,7 +7040,6 @@ def crear_rutina_desde_mensaje(
     )
 
 
-
 def buscar_rutina_desde_mensaje(
     mensaje
 ):
@@ -7351,7 +7334,6 @@ def editar_rutina_desde_mensaje(
         f"— {frecuencia_texto} "
         f"a las {actualizada[4]}."
     )
-
 
 
 def es_eliminacion_rutina(
@@ -8310,8 +8292,6 @@ def agenda_semana():
     )
 
 
-
-
 # ==========================================================
 # AUDITORÍA Y LIMPIEZA TAREA ↔ RECORDATORIOS
 # ==========================================================
@@ -8862,6 +8842,524 @@ def es_consulta_independiente(
 # COMANDOS LOCALES
 # ==========================================================
 
+
+# ==========================================================
+# CONFIGURACIÓN DEL RESUMEN DIARIO
+# ==========================================================
+
+def es_auditoria_resumen_diario(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_resumen = any(
+        expresion in texto
+        for expresion in (
+            "resumen diario",
+            "resumen de la manana",
+            "resumen matutino",
+        )
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "revisa",
+            "revisar",
+            "audita",
+            "auditar",
+            "verifica",
+            "verificar",
+            "corrobora",
+            "corroborar",
+        )
+    )
+
+    return (
+        menciona_resumen
+        and accion
+    )
+
+
+def revisar_resumen_diario_desde_hermes():
+    resultado = auditar_configuracion_resumen_diario()
+
+    correcciones = resultado.get(
+        "correcciones",
+        []
+    )
+
+    if resultado.get("estado") == "correcto":
+
+        estado = (
+            "activo"
+            if resultado.get("activo")
+            else "desactivado"
+        )
+
+        ultimo_envio = resultado.get(
+            "ultimo_envio"
+        )
+
+        respuesta = (
+            "La configuración del resumen diario "
+            f"está correcta. Está {estado} y "
+            f"programado para las "
+            f"{resultado.get('hora')}."
+        )
+
+        if ultimo_envio:
+            respuesta += (
+                f" Último envío registrado: "
+                f"{ultimo_envio}."
+            )
+
+        respuesta += (
+            " El control antidupl. está activo: "
+            "solo puede reclamarse un envío automático "
+            "por día."
+        )
+
+        return respuesta
+
+    partes = [
+        "Revisé la configuración del resumen diario "
+        "y corregí lo necesario."
+    ]
+
+    if correcciones:
+        partes.append(
+            " ".join(correcciones)
+        )
+
+    partes.append(
+        "El control antidupl. quedó activo."
+    )
+
+    return " ".join(
+        partes
+    )
+
+
+def es_cambio_hora_resumen_diario(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    menciona_resumen = any(
+        expresion in texto
+        for expresion in (
+            "resumen diario",
+            "resumen de la manana",
+            "resumen de mañana",
+            "resumen matutino",
+            "resumen de cada manana",
+            "resumen cada manana",
+        )
+    )
+
+    accion = any(
+        expresion in texto
+        for expresion in (
+            "mandame",
+            "enviame",
+            "envia",
+            "cambia",
+            "cambiar",
+            "pone",
+            "poner",
+            "programa",
+            "programar",
+            "quiero",
+        )
+    )
+
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    return (
+        menciona_resumen
+        and accion
+        and hora is not None
+    )
+
+
+def cambiar_hora_resumen_diario_desde_mensaje(
+    mensaje
+):
+    hora, _ = extraer_horas_del_mensaje(
+        mensaje
+    )
+
+    if not hora:
+        return (
+            "No pude identificar la hora del "
+            "resumen diario."
+        )
+
+    estado, hora_guardada = configurar_hora_resumen_diario(
+        hora
+    )
+
+    if estado != "actualizada":
+        return (
+            "No pude guardar esa hora para "
+            "el resumen diario."
+        )
+
+    return (
+        f"Listo. El resumen diario automático "
+        f"queda programado para las "
+        f"{hora_guardada}."
+    )
+
+
+def es_consulta_hora_resumen_diario(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        expresion in texto
+        for expresion in (
+            "a que hora esta el resumen diario",
+            "a que hora tengo el resumen diario",
+            "a que hora se envia el resumen diario",
+            "hora del resumen diario",
+            "cuando se envia el resumen diario",
+            "cuando llega el resumen diario",
+        )
+    )
+
+
+def mostrar_hora_resumen_diario():
+    configuracion = obtener_configuracion_resumen_diario()
+
+    if not configuracion:
+        return (
+            "No encontré la configuración "
+            "del resumen diario."
+        )
+
+    activo, hora, ultimo_envio = configuracion
+
+    if activo:
+        estado = "activo"
+    else:
+        estado = "desactivado"
+
+    respuesta = (
+        f"El resumen diario automático está "
+        f"{estado} y programado para las "
+        f"{hora}."
+    )
+
+    if ultimo_envio:
+        respuesta += (
+            f" Último envío registrado: "
+            f"{ultimo_envio}."
+        )
+
+    return respuesta
+
+
+# ==========================================================
+# RESUMEN DIARIO
+# ==========================================================
+
+def es_resumen_diario_manual(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    expresiones = (
+        "dame mi resumen de hoy",
+        "dame el resumen de hoy",
+        "mi resumen de hoy",
+        "resumen de hoy",
+        "resumen diario",
+        "como viene mi dia",
+        "como esta mi dia",
+        "que tengo para hoy",
+        "organizame el dia",
+        "organiza mi dia",
+    )
+
+    return any(
+        expresion in texto
+        for expresion in expresiones
+    )
+
+
+def formatear_tarea_resumen(
+    tarea
+):
+    prioridad = (
+        tarea[5]
+        if len(tarea) > 5 and tarea[5]
+        else "media"
+    )
+
+    texto = (
+        f"#{tarea[0]} {tarea[1]} "
+        f"— prioridad {prioridad}"
+    )
+
+    if tarea[3]:
+
+        etiqueta = etiqueta_vencimiento_tarea(
+            tarea[3]
+        )
+
+        if etiqueta:
+            texto += (
+                f" — {etiqueta}"
+            )
+
+        elif tarea[3] != date.today().isoformat():
+            texto += (
+                f" — {fecha_para_mostrar(tarea[3])}"
+            )
+
+    else:
+        texto += (
+            " — sin fecha"
+        )
+
+    return texto
+
+
+def generar_resumen_diario():
+    hoy = date.today()
+    hoy_iso = hoy.isoformat()
+
+    tareas = obtener_tareas_pendientes()
+
+    tareas_hoy = [
+        tarea
+        for tarea in tareas
+        if tarea[3] == hoy_iso
+    ]
+
+    tareas_atrasadas = []
+
+    for tarea in tareas:
+
+        if not tarea[3]:
+            continue
+
+        try:
+            fecha_tarea = date.fromisoformat(
+                tarea[3]
+            )
+
+        except ValueError:
+            continue
+
+        if fecha_tarea < hoy:
+            tareas_atrasadas.append(
+                tarea
+            )
+
+    prioridades = sorted(
+        tareas,
+        key=puntaje_urgencia_tarea
+    )[:3]
+
+    eventos_hoy = obtener_eventos_por_fecha(
+        hoy_iso
+    )
+
+    recordatorios = obtener_recordatorios_pendientes()
+
+    recordatorios_relevantes = []
+
+    for recordatorio in recordatorios:
+
+        try:
+            momento = datetime.fromisoformat(
+                recordatorio[3]
+            )
+
+        except (TypeError, ValueError):
+            continue
+
+        if momento.date() <= hoy:
+            recordatorios_relevantes.append(
+                (
+                    recordatorio,
+                    momento,
+                )
+            )
+
+    lineas = [
+        (
+            f"Resumen de hoy — "
+            f"{hoy.strftime('%d/%m/%Y')}"
+        ),
+        "",
+        (
+            f"Tenés {len(tareas_hoy)} "
+            f"{'tarea' if len(tareas_hoy) == 1 else 'tareas'} "
+            f"para hoy, {len(tareas_atrasadas)} "
+            f"{'atrasada' if len(tareas_atrasadas) == 1 else 'atrasadas'}, "
+            f"{len(eventos_hoy)} "
+            f"{'evento' if len(eventos_hoy) == 1 else 'eventos'} "
+            "hoy."
+        ),
+        "",
+        "📌 Prioridades:",
+    ]
+
+    if prioridades:
+
+        for indice, tarea in enumerate(
+            prioridades,
+            start=1
+        ):
+            lineas.append(
+                f"{indice}. "
+                f"{formatear_tarea_resumen(tarea)}"
+            )
+
+    else:
+        lineas.append(
+            "No tenés tareas pendientes."
+        )
+
+    lineas.extend(
+        [
+            "",
+            "✅ Tareas de hoy:",
+        ]
+    )
+
+    if tareas_hoy:
+
+        tareas_hoy_ordenadas = sorted(
+            tareas_hoy,
+            key=puntaje_urgencia_tarea
+        )
+
+        for tarea in tareas_hoy_ordenadas:
+            lineas.append(
+                f"- {formatear_tarea_resumen(tarea)}"
+            )
+
+    else:
+        lineas.append(
+            "No tenés tareas con vencimiento hoy."
+        )
+
+    lineas.extend(
+        [
+            "",
+            "⚠️ Tareas atrasadas:",
+        ]
+    )
+
+    if tareas_atrasadas:
+
+        tareas_atrasadas_ordenadas = sorted(
+            tareas_atrasadas,
+            key=puntaje_urgencia_tarea
+        )
+
+        for tarea in tareas_atrasadas_ordenadas:
+            lineas.append(
+                f"- {formatear_tarea_resumen(tarea)}"
+            )
+
+    else:
+        lineas.append(
+            "No tenés tareas atrasadas."
+        )
+
+    lineas.extend(
+        [
+            "",
+            "📅 Agenda de hoy:",
+        ]
+    )
+
+    if eventos_hoy:
+
+        for evento in eventos_hoy:
+
+            texto_evento = (
+                f"- #{evento[0]} {evento[1]}"
+            )
+
+            if evento[4]:
+                texto_evento += (
+                    f" — {evento[4]}"
+                )
+
+            if evento[5]:
+                texto_evento += (
+                    f" a {evento[5]}"
+                )
+
+            lineas.append(
+                texto_evento
+            )
+
+    else:
+        lineas.append(
+            "No tenés eventos hoy."
+        )
+
+    lineas.extend(
+        [
+            "",
+            "🔔 Recordatorios pendientes:",
+        ]
+    )
+
+    if recordatorios_relevantes:
+
+        recordatorios_relevantes.sort(
+            key=lambda elemento: elemento[1]
+        )
+
+        for recordatorio, momento in recordatorios_relevantes:
+
+            if momento.date() < hoy:
+                cuando = (
+                    f"vencido "
+                    f"{momento.strftime('%d/%m %H:%M')}"
+                )
+            else:
+                cuando = (
+                    f"hoy {momento.strftime('%H:%M')}"
+                )
+
+            lineas.append(
+                f"- #{recordatorio[0]} "
+                f"{recordatorio[1]} "
+                f"— {cuando}"
+            )
+
+    else:
+        lineas.append(
+            "No tenés recordatorios pendientes "
+            "para hoy ni vencidos."
+        )
+
+    return "\n".join(
+        lineas
+    )
+
+
 def procesar_comandos_directos(
     mensaje
 ):
@@ -8871,6 +9369,44 @@ def procesar_comandos_directos(
     texto = normalizar_texto(
         mensaje
     )
+
+    if es_auditoria_resumen_diario(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return revisar_resumen_diario_desde_hermes()
+
+    if es_cambio_hora_resumen_diario(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return cambiar_hora_resumen_diario_desde_mensaje(
+            mensaje
+        )
+
+    if es_consulta_hora_resumen_diario(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return mostrar_hora_resumen_diario()
+
+    if es_resumen_diario_manual(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return generar_resumen_diario()
 
     # Las órdenes completas de prioridad + fecha deben resolverse
     # antes que la edición contextual. Palabras como "pasala"
@@ -9963,6 +10499,16 @@ print("🔁 Eventos recurrentes: creación y consulta activas")
 print("🗓️ Próximas ocurrencias recurrentes: materialización automática activa")
 print("🎛️ Edición, pausa, reanudación y eliminación de eventos recurrentes: activas")
 print("🧪 Auditoría y limpieza de eventos recurrentes: activas")
+print("☀️ Resumen diario manual: activo")
+hora_resumen_configurada = obtener_hora_resumen_diario()
+
+if hora_resumen_configurada:
+    print(
+        f"🌅 Resumen diario automático: activo a las "
+        f"{hora_resumen_configurada}"
+    )
+
+print("🧪 Auditoría y control antidupl. del resumen diario: activos")
 print()
 print("Escribí 'salir' para terminar.")
 print()

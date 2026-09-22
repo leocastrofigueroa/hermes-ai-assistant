@@ -1,5 +1,6 @@
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta
 
@@ -59,6 +60,26 @@ def crear_tabla_recordatorios():
             ALTER TABLE recordatorios
             ADD COLUMN tarea_id INTEGER
         """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS configuracion_resumen_diario (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            activo INTEGER NOT NULL DEFAULT 1,
+            hora TEXT NOT NULL DEFAULT '08:00',
+            ultimo_envio TEXT,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO configuracion_resumen_diario (
+            id,
+            activo,
+            hora,
+            ultimo_envio
+        )
+        VALUES (1, 1, '08:00', NULL)
+    """)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rutinas (
@@ -1268,6 +1289,744 @@ def enviar_notificacion(
 
 
 # ==========================================================
+# RESUMEN DIARIO AUTOMÁTICO
+# ==========================================================
+
+def obtener_configuracion_resumen_diario():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            activo,
+            hora,
+            ultimo_envio
+        FROM configuracion_resumen_diario
+        WHERE id = 1
+        LIMIT 1
+    """)
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
+def configurar_hora_resumen_diario(
+    nueva_hora
+):
+    try:
+        hora_validada = datetime.strptime(
+            nueva_hora,
+            "%H:%M"
+        ).strftime(
+            "%H:%M"
+        )
+
+    except (TypeError, ValueError):
+        return (
+            "hora_invalida",
+            None
+        )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE configuracion_resumen_diario
+        SET hora = ?,
+            activo = 1,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = 1
+    """, (
+        hora_validada,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+    return (
+        "actualizada",
+        hora_validada
+    )
+
+
+def obtener_hora_resumen_diario():
+    configuracion = obtener_configuracion_resumen_diario()
+
+    if not configuracion:
+        return None
+
+    return configuracion[1]
+
+
+def auditar_configuracion_resumen_diario():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            activo,
+            hora,
+            ultimo_envio
+        FROM configuracion_resumen_diario
+        WHERE id = 1
+        LIMIT 1
+    """)
+
+    fila = cursor.fetchone()
+
+    if not fila:
+        cursor.execute("""
+            INSERT INTO configuracion_resumen_diario (
+                id,
+                activo,
+                hora,
+                ultimo_envio
+            )
+            VALUES (1, 1, '08:00', NULL)
+        """)
+
+        conexion.commit()
+        conexion.close()
+
+        return {
+            "estado": "corregido",
+            "correcciones": [
+                "La configuración no existía y fue recreada con 08:00."
+            ],
+        }
+
+    activo, hora, ultimo_envio = fila
+    correcciones = []
+
+    if activo not in (0, 1):
+        cursor.execute("""
+            UPDATE configuracion_resumen_diario
+            SET activo = 0,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = 1
+        """)
+
+        activo = 0
+        correcciones.append(
+            "El estado era inválido y el resumen fue desactivado por seguridad."
+        )
+
+    hora_valida = True
+
+    try:
+        datetime.strptime(
+            hora,
+            "%H:%M"
+        )
+
+    except (TypeError, ValueError):
+        hora_valida = False
+
+    if not hora_valida:
+        cursor.execute("""
+            UPDATE configuracion_resumen_diario
+            SET hora = '08:00',
+                activo = 0,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = 1
+        """)
+
+        hora = "08:00"
+        activo = 0
+        correcciones.append(
+            "La hora era inválida; la restablecí a 08:00 y desactivé el envío automático."
+        )
+
+    if ultimo_envio:
+        ultimo_valido = True
+
+        try:
+            fecha_ultimo = datetime.strptime(
+                ultimo_envio,
+                "%Y-%m-%d"
+            ).date()
+
+        except (TypeError, ValueError):
+            ultimo_valido = False
+            fecha_ultimo = None
+
+        if (
+            not ultimo_valido
+            or (
+                fecha_ultimo is not None
+                and fecha_ultimo > datetime.now().date()
+            )
+        ):
+            cursor.execute("""
+                UPDATE configuracion_resumen_diario
+                SET ultimo_envio = NULL,
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """)
+
+            ultimo_envio = None
+            correcciones.append(
+                "El último envío registrado era inválido y fue limpiado."
+            )
+
+    conexion.commit()
+    conexion.close()
+
+    return {
+        "estado": (
+            "corregido"
+            if correcciones
+            else "correcto"
+        ),
+        "activo": activo,
+        "hora": hora,
+        "ultimo_envio": ultimo_envio,
+        "correcciones": correcciones,
+    }
+
+
+def reclamar_envio_resumen_diario(
+    ahora
+):
+    hoy_iso = ahora.date().isoformat()
+
+    conexion = conectar(
+    )
+
+    try:
+        conexion.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            SELECT
+                activo,
+                hora,
+                ultimo_envio
+            FROM configuracion_resumen_diario
+            WHERE id = 1
+            LIMIT 1
+        """)
+
+        configuracion = cursor.fetchone()
+
+        if not configuracion:
+            conexion.rollback()
+            return False
+
+        activo, hora, ultimo_envio = configuracion
+
+        if not activo:
+            conexion.rollback()
+            return False
+
+        if not resumen_diario_debe_enviarse(
+            ahora,
+            hora,
+            ultimo_envio
+        ):
+            conexion.rollback()
+            return False
+
+        cursor.execute("""
+            UPDATE configuracion_resumen_diario
+            SET ultimo_envio = ?,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = 1
+              AND (
+                    ultimo_envio IS NULL
+                    OR ultimo_envio != ?
+              )
+        """, (
+            hoy_iso,
+            hoy_iso,
+        ))
+
+        reclamado = (
+            cursor.rowcount == 1
+        )
+
+        if reclamado:
+            conexion.commit()
+        else:
+            conexion.rollback()
+
+        return reclamado
+
+    finally:
+        conexion.close()
+
+
+def marcar_resumen_diario_enviado(
+    fecha_iso
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE configuracion_resumen_diario
+        SET ultimo_envio = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = 1
+    """, (
+        fecha_iso,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+
+def obtener_datos_resumen_diario():
+    ahora = datetime.now()
+    hoy = ahora.date()
+    hoy_iso = hoy.isoformat()
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            fecha,
+            prioridad
+        FROM tareas
+        WHERE estado = 'pendiente'
+        ORDER BY
+            CASE
+                WHEN fecha IS NULL THEN 1
+                ELSE 0
+            END,
+            fecha ASC,
+            CASE prioridad
+                WHEN 'alta' THEN 0
+                WHEN 'media' THEN 1
+                WHEN 'baja' THEN 2
+                ELSE 1
+            END,
+            id ASC
+    """)
+
+    tareas = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            fecha,
+            hora_inicio,
+            hora_fin
+        FROM eventos
+        WHERE estado = 'activo'
+          AND fecha = ?
+        ORDER BY
+            CASE
+                WHEN hora_inicio IS NULL THEN 1
+                ELSE 0
+            END,
+            hora_inicio ASC,
+            id ASC
+    """, (
+        hoy_iso,
+    ))
+
+    eventos_hoy = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            fecha_hora
+        FROM recordatorios
+        WHERE estado = 'pendiente'
+        ORDER BY fecha_hora ASC, id ASC
+    """)
+
+    recordatorios = cursor.fetchall()
+
+    conexion.close()
+
+    tareas_hoy = []
+    tareas_atrasadas = []
+
+    for tarea in tareas:
+        fecha = tarea[2]
+
+        if not fecha:
+            continue
+
+        try:
+            fecha_obj = datetime.strptime(
+                fecha,
+                "%Y-%m-%d"
+            ).date()
+
+        except (TypeError, ValueError):
+            continue
+
+        if fecha_obj == hoy:
+            tareas_hoy.append(
+                tarea
+            )
+
+        elif fecha_obj < hoy:
+            tareas_atrasadas.append(
+                tarea
+            )
+
+    recordatorios_relevantes = []
+
+    for recordatorio in recordatorios:
+
+        try:
+            momento = datetime.fromisoformat(
+                recordatorio[2]
+            )
+
+        except (TypeError, ValueError):
+            continue
+
+        if momento.date() <= hoy:
+            recordatorios_relevantes.append(
+                (
+                    recordatorio,
+                    momento,
+                )
+            )
+
+    return {
+        "ahora": ahora,
+        "hoy": hoy,
+        "tareas": tareas,
+        "tareas_hoy": tareas_hoy,
+        "tareas_atrasadas": tareas_atrasadas,
+        "eventos_hoy": eventos_hoy,
+        "recordatorios": recordatorios_relevantes,
+    }
+
+
+def prioridad_numerica_resumen(
+    prioridad
+):
+    return {
+        "alta": 0,
+        "media": 1,
+        "baja": 2,
+    }.get(
+        prioridad or "media",
+        1
+    )
+
+
+def clave_urgencia_resumen(
+    tarea,
+    hoy
+):
+    fecha = tarea[2]
+
+    if fecha:
+        try:
+            fecha_obj = datetime.strptime(
+                fecha,
+                "%Y-%m-%d"
+            ).date()
+
+        except (TypeError, ValueError):
+            fecha_obj = None
+
+        if fecha_obj is not None:
+
+            if fecha_obj < hoy:
+                grupo = 0
+
+            elif fecha_obj == hoy:
+                grupo = 1
+
+            else:
+                grupo = 2
+
+            return (
+                grupo,
+                fecha_obj,
+                prioridad_numerica_resumen(
+                    tarea[3]
+                ),
+                tarea[0],
+            )
+
+    return (
+        3,
+        datetime.max.date(),
+        prioridad_numerica_resumen(
+            tarea[3]
+        ),
+        tarea[0],
+    )
+
+
+def generar_resumen_diario_motor():
+    datos = obtener_datos_resumen_diario()
+
+    hoy = datos["hoy"]
+    tareas = datos["tareas"]
+    tareas_hoy = datos["tareas_hoy"]
+    tareas_atrasadas = datos[
+        "tareas_atrasadas"
+    ]
+    eventos_hoy = datos[
+        "eventos_hoy"
+    ]
+    recordatorios = datos[
+        "recordatorios"
+    ]
+
+    prioridades = sorted(
+        tareas,
+        key=lambda tarea: clave_urgencia_resumen(
+            tarea,
+            hoy
+        )
+    )[:3]
+
+    lineas = [
+        (
+            f"Resumen de hoy — "
+            f"{hoy.strftime('%d/%m/%Y')}"
+        ),
+        (
+            f"{len(tareas_hoy)} tareas para hoy, "
+            f"{len(tareas_atrasadas)} atrasadas, "
+            f"{len(eventos_hoy)} eventos hoy."
+        ),
+    ]
+
+    if prioridades:
+        lineas.append(
+            "Prioridades:"
+        )
+
+        for indice, tarea in enumerate(
+            prioridades,
+            start=1
+        ):
+            prioridad = (
+                tarea[3]
+                if tarea[3]
+                else "media"
+            )
+
+            texto = (
+                f"{indice}. {tarea[1]} "
+                f"({prioridad})"
+            )
+
+            if tarea[2]:
+                try:
+                    fecha_obj = datetime.strptime(
+                        tarea[2],
+                        "%Y-%m-%d"
+                    ).date()
+
+                    if fecha_obj < hoy:
+                        dias = (
+                            hoy
+                            - fecha_obj
+                        ).days
+
+                        texto += (
+                            f" — atrasada "
+                            f"{dias} "
+                            f"{'día' if dias == 1 else 'días'}"
+                        )
+
+                    elif fecha_obj == hoy:
+                        texto += (
+                            " — vence hoy"
+                        )
+
+                except (TypeError, ValueError):
+                    pass
+
+            lineas.append(
+                texto
+            )
+
+    if eventos_hoy:
+        lineas.append(
+            "Agenda:"
+        )
+
+        for evento in eventos_hoy:
+
+            texto = (
+                f"- {evento[1]}"
+            )
+
+            if evento[3]:
+                texto += (
+                    f" {evento[3]}"
+                )
+
+            if evento[4]:
+                texto += (
+                    f"-{evento[4]}"
+                )
+
+            lineas.append(
+                texto
+            )
+
+    if recordatorios:
+        lineas.append(
+            "Recordatorios pendientes:"
+        )
+
+        for recordatorio, momento in recordatorios:
+
+            if momento.date() < hoy:
+                cuando = (
+                    f"vencido "
+                    f"{momento.strftime('%d/%m %H:%M')}"
+                )
+            else:
+                cuando = (
+                    f"hoy {momento.strftime('%H:%M')}"
+                )
+
+            lineas.append(
+                f"- {recordatorio[1]} — {cuando}"
+            )
+
+    return "\n".join(
+        lineas
+    )
+
+
+def generar_texto_notificacion_resumen():
+    datos = obtener_datos_resumen_diario()
+
+    hoy = datos["hoy"]
+    tareas = datos["tareas"]
+    tareas_hoy = datos["tareas_hoy"]
+    atrasadas = datos["tareas_atrasadas"]
+    eventos = datos["eventos_hoy"]
+
+    prioridades = sorted(
+        tareas,
+        key=lambda tarea: clave_urgencia_resumen(
+            tarea,
+            hoy
+        )
+    )[:1]
+
+    partes = [
+        f"{len(tareas_hoy)} tareas hoy",
+        f"{len(atrasadas)} atrasadas",
+        f"{len(eventos)} eventos",
+    ]
+
+    if prioridades:
+        partes.append(
+            f"Prioridad: {prioridades[0][1]}"
+        )
+
+    return " • ".join(
+        partes
+    )
+
+
+def resumen_diario_debe_enviarse(
+    ahora,
+    hora_configurada,
+    ultimo_envio
+):
+    if ultimo_envio == ahora.date().isoformat():
+        return False
+
+    try:
+        hora_objetivo = datetime.strptime(
+            hora_configurada,
+            "%H:%M"
+        ).time()
+
+    except (TypeError, ValueError):
+        return False
+
+    objetivo = datetime.combine(
+        ahora.date(),
+        hora_objetivo
+    )
+
+    # En 19.2 usamos una ventana de mañana:
+    # desde la hora configurada hasta 4 horas después.
+    limite = objetivo + timedelta(
+        hours=4
+    )
+
+    return (
+        objetivo <= ahora < limite
+    )
+
+
+def revisar_resumen_diario():
+    ahora = datetime.now()
+
+    if not reclamar_envio_resumen_diario(
+        ahora
+    ):
+        return False
+
+    resumen = generar_resumen_diario_motor()
+    texto_notificacion = (
+        generar_texto_notificacion_resumen()
+    )
+
+    enviar_notificacion(
+        "Resumen diario",
+        texto_notificacion
+    )
+
+    print()
+    print(
+        "☀️ RESUMEN DIARIO AUTOMÁTICO"
+    )
+    print(
+        resumen,
+        flush=True
+    )
+    print()
+
+    return True
+
+
+def probar_resumen_diario():
+    resumen = generar_resumen_diario_motor()
+
+    enviar_notificacion(
+        "Prueba de resumen diario",
+        generar_texto_notificacion_resumen()
+    )
+
+    print()
+    print(
+        "☀️ PRUEBA DE RESUMEN DIARIO"
+    )
+    print(
+        resumen
+    )
+    print()
+    print(
+        "La prueba no marca el resumen de hoy como enviado."
+    )
+    print()
+
+
+# ==========================================================
 # MOTOR
 # ==========================================================
 
@@ -1342,6 +2101,20 @@ def ejecutar_motor():
     print(
         "Eventos recurrentes: materialización automática activa."
     )
+    configuracion_resumen = obtener_configuracion_resumen_diario()
+
+    if configuracion_resumen:
+        estado_resumen = (
+            "activo"
+            if configuracion_resumen[0]
+            else "desactivado"
+        )
+
+        print(
+            f"Resumen diario automático: "
+            f"{estado_resumen} a las "
+            f"{configuracion_resumen[1]}."
+        )
     print(
         "Ctrl + C para detener."
     )
@@ -1351,6 +2124,7 @@ def ejecutar_motor():
 
         try:
             materializar_proximos_eventos_recurrentes()
+            revisar_resumen_diario()
             revisar_recordatorios()
             revisar_rutinas()
 
@@ -1367,4 +2141,18 @@ def ejecutar_motor():
 
 
 if __name__ == "__main__":
-    ejecutar_motor()
+    crear_tabla_recordatorios()
+
+    if "--probar-resumen" in sys.argv:
+        probar_resumen_diario()
+
+    elif "--auditar-resumen" in sys.argv:
+        resultado = auditar_configuracion_resumen_diario()
+
+        print()
+        print("🧪 AUDITORÍA DEL RESUMEN DIARIO")
+        print(resultado)
+        print()
+
+    else:
+        ejecutar_motor()
