@@ -1,6 +1,7 @@
 import json
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 
 import requests
@@ -9,6 +10,17 @@ from memoria import (
     crear_base,
     guardar_recuerdo,
     obtener_recuerdos,
+    guardar_mensaje_conversacion,
+    obtener_historial_conversacion,
+    limpiar_historial_conversacion,
+    contar_historial_conversacion,
+    obtener_historial_antiguo,
+    eliminar_historial_hasta,
+    obtener_resumen_contexto,
+    actualizar_resumen_contexto,
+    limpiar_resumen_contexto,
+    auditar_contexto_conversacional_db,
+    reparar_contexto_conversacional_db,
     crear_tarea,
     obtener_tareas_pendientes,
     obtener_tareas_por_fecha,
@@ -78,6 +90,635 @@ crear_tabla_recordatorios()
 
 confirmacion_pendiente = None
 ultimo_contexto_edicion = None
+
+
+MAX_MENSAJES_CONTEXTO = 8
+MAX_HISTORIAL_SIN_COMPACTAR = 24
+MENSAJES_A_CONSERVAR = 10
+MAX_CARACTERES_RESUMEN_CONTEXTO = 6000
+
+
+def obtener_texto_resumen_contexto():
+    contenido, mensajes_compactados, _fecha = obtener_resumen_contexto()
+
+    if not contenido:
+        return "Sin resumen anterior."
+
+    return (
+        f"{contenido}\n"
+        f"[{mensajes_compactados} mensajes anteriores compactados]"
+    )
+
+
+def construir_resumen_extractivo(
+    mensajes
+):
+    lineas = []
+
+    for (
+        _mensaje_id,
+        rol,
+        contenido,
+        _fecha_creacion,
+    ) in mensajes:
+        contenido = re.sub(
+            r"\s+",
+            " ",
+            str(contenido or ""),
+        ).strip()
+
+        if not contenido:
+            continue
+
+        if len(contenido) > 220:
+            contenido = (
+                contenido[:217].rstrip()
+                + "..."
+            )
+
+        etiqueta = (
+            "Leo"
+            if rol == "usuario"
+            else "Hermes"
+        )
+
+        lineas.append(
+            f"- {etiqueta}: {contenido}"
+        )
+
+    return "\n".join(lineas)
+
+
+def compactar_contexto_conversacional(
+    forzar=False
+):
+    cantidad = contar_historial_conversacion()
+
+    if not forzar and cantidad <= MAX_HISTORIAL_SIN_COMPACTAR:
+        return None
+
+    cantidad_compactar = max(
+        0,
+        cantidad - MENSAJES_A_CONSERVAR,
+    )
+
+    if cantidad_compactar <= 0:
+        return (
+            "No hay suficiente historial para compactar."
+            if forzar
+            else None
+        )
+
+    antiguos = obtener_historial_antiguo(
+        cantidad_compactar
+    )
+
+    if not antiguos:
+        return (
+            "No hay historial para compactar."
+            if forzar
+            else None
+        )
+
+    bloque = construir_resumen_extractivo(
+        antiguos
+    )
+
+    resumen_actual, _total, _fecha = obtener_resumen_contexto()
+
+    partes = [
+        parte.strip()
+        for parte in (
+            resumen_actual,
+            bloque,
+        )
+        if parte and parte.strip()
+    ]
+
+    resumen_nuevo = "\n".join(
+        partes
+    )
+
+    if len(resumen_nuevo) > MAX_CARACTERES_RESUMEN_CONTEXTO:
+        resumen_nuevo = resumen_nuevo[
+            -MAX_CARACTERES_RESUMEN_CONTEXTO:
+        ]
+
+        primer_salto = resumen_nuevo.find(
+            "\n"
+        )
+
+        if primer_salto >= 0:
+            resumen_nuevo = resumen_nuevo[
+                primer_salto + 1:
+            ]
+
+    ultimo_id = antiguos[-1][0]
+
+    actualizar_resumen_contexto(
+        resumen_nuevo,
+        len(antiguos),
+    )
+
+    eliminar_historial_hasta(
+        ultimo_id
+    )
+
+    if forzar:
+        return (
+            f"Listo. Compacté {len(antiguos)} mensajes "
+            f"y conservé los {contar_historial_conversacion()} "
+            f"más recientes."
+        )
+
+    return None
+
+
+def mostrar_estado_contexto():
+    recientes = contar_historial_conversacion()
+    _contenido, compactados, _fecha = obtener_resumen_contexto()
+
+    return (
+        f"Contexto: {recientes} mensajes recientes "
+        f"y {compactados} mensajes compactados."
+    )
+
+
+def es_comando_compactar_contexto(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "compacta el contexto",
+            "compactar el contexto",
+            "comprime el contexto",
+            "comprimir el contexto",
+        )
+    )
+
+
+def es_consulta_estado_contexto(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "estado del contexto",
+            "como esta el contexto",
+            "cuanto contexto",
+        )
+    )
+
+
+def es_auditoria_contexto_conversacional(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "audita el contexto",
+            "auditar el contexto",
+            "audita el contexto conversacional",
+            "revisa el contexto conversacional",
+            "revisar el contexto conversacional",
+        )
+    )
+
+
+def es_reparacion_contexto_conversacional(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return any(
+        frase in texto
+        for frase in (
+            "repara el contexto",
+            "reparar el contexto",
+            "limpia errores del contexto",
+            "corrige el contexto",
+            "corregir el contexto",
+        )
+    )
+
+
+def auditar_contexto_conversacional():
+    datos = auditar_contexto_conversacional_db()
+
+    problemas = []
+
+    if datos["roles_invalidos"]:
+        problemas.append(
+            f'{datos["roles_invalidos"]} roles inválidos'
+        )
+
+    if datos["mensajes_vacios"]:
+        problemas.append(
+            f'{datos["mensajes_vacios"]} mensajes vacíos'
+        )
+
+    if datos["resumen_faltante"]:
+        problemas.append(
+            "falta el registro de resumen"
+        )
+
+    if datos["resumen_demasiado_largo"]:
+        problemas.append(
+            "el resumen supera el límite"
+        )
+
+    if datos["compactados_invalidos"]:
+        problemas.append(
+            "el contador de compactados es inválido"
+        )
+
+    if datos["total_recientes"] > MAX_HISTORIAL_SIN_COMPACTAR:
+        problemas.append(
+            "hay demasiados mensajes recientes sin compactar"
+        )
+
+    if not problemas:
+        return (
+            "El contexto está correcto. "
+            f'Recientes: {datos["total_recientes"]}. '
+            f'Compactados: {datos["mensajes_compactados"]}.'
+        )
+
+    return (
+        "Encontré problemas en el contexto: "
+        + "; ".join(problemas)
+        + "."
+    )
+
+
+def reparar_contexto_conversacional():
+    resultado = reparar_contexto_conversacional_db()
+
+    compactacion = compactar_contexto_conversacional()
+
+    auditoria = auditar_contexto_conversacional_db()
+
+    correcto = (
+        auditoria["roles_invalidos"] == 0
+        and auditoria["mensajes_vacios"] == 0
+        and not auditoria["resumen_faltante"]
+        and not auditoria["resumen_demasiado_largo"]
+        and not auditoria["compactados_invalidos"]
+        and auditoria["total_recientes"]
+        <= MAX_HISTORIAL_SIN_COMPACTAR
+    )
+
+    if correcto:
+        return (
+            "Listo. El contexto quedó limpio y consistente. "
+            f'Recientes: {auditoria["total_recientes"]}. '
+            f'Compactados: {auditoria["mensajes_compactados"]}.'
+        )
+
+    return (
+        "La reparación terminó, pero todavía hay "
+        "inconsistencias. Ejecutá: Auditá el contexto."
+    )
+
+
+def es_comando_mantenimiento_contexto(
+    mensaje
+):
+    return (
+        es_limpieza_contexto_conversacional(
+            mensaje
+        )
+        or es_comando_compactar_contexto(
+            mensaje
+        )
+        or es_consulta_estado_contexto(
+            mensaje
+        )
+        or es_auditoria_contexto_conversacional(
+            mensaje
+        )
+        or es_reparacion_contexto_conversacional(
+            mensaje
+        )
+    )
+
+
+def obtener_texto_contexto_conversacional():
+    historial = obtener_historial_conversacion(
+        MAX_MENSAJES_CONTEXTO
+    )
+
+    if not historial:
+        return (
+            "Sin conversación reciente."
+        )
+
+    lineas = []
+
+    for (
+        _mensaje_id,
+        rol,
+        contenido,
+        _fecha_creacion,
+    ) in historial:
+
+        etiqueta = (
+            "Leo"
+            if rol == "usuario"
+            else "Hermes"
+        )
+
+        lineas.append(
+            f"{etiqueta}: {contenido}"
+        )
+
+    return "\\n".join(
+        lineas
+    )
+
+
+def obtener_referente_conversacional_reciente():
+    historial = obtener_historial_conversacion(
+        20
+    )
+
+    for (
+        _mensaje_id,
+        rol,
+        contenido,
+        _fecha_creacion,
+    ) in reversed(historial):
+        if rol != "usuario":
+            continue
+
+        contenido = str(
+            contenido or ""
+        ).strip()
+
+        if not contenido:
+            continue
+
+        texto = normalizar_texto(
+            contenido
+        )
+
+        texto_limpio = re.sub(
+            r"[^a-z0-9ñü\s]",
+            " ",
+            texto,
+        )
+
+        texto_limpio = re.sub(
+            r"\s+",
+            " ",
+            texto_limpio,
+        ).strip()
+
+        if texto_limpio in (
+            "y cuando",
+            "cuando",
+            "y donde",
+            "donde",
+            "y con quien",
+            "con quien",
+            "y cual",
+            "cual",
+        ):
+            continue
+
+        if (
+            "que te dije" in texto_limpio
+            or "que estaba pensando" in texto_limpio
+        ):
+            continue
+
+        return contenido
+
+    return None
+
+
+def es_referencia_natural_corta(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    texto = re.sub(
+        r"[^a-z0-9ñü\\s]",
+        " ",
+        texto,
+    )
+
+    texto = re.sub(
+        r"\\s+",
+        " ",
+        texto,
+    ).strip()
+
+    return texto in (
+        "y cuando",
+        "cuando",
+        "y donde",
+        "donde",
+        "y con quien",
+        "con quien",
+        "y cual",
+        "cual",
+    )
+
+
+def resolver_referencia_natural_corta(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    texto = re.sub(
+        r"[^a-z0-9ñü\s]",
+        " ",
+        texto,
+    )
+
+    texto = re.sub(
+        r"\s+",
+        " ",
+        texto,
+    ).strip()
+
+    referente = obtener_referente_conversacional_reciente()
+
+    if not referente:
+        return (
+            "No tengo suficiente contexto reciente "
+            "para saber a qué te referís."
+        )
+
+    referente_normalizado = normalizar_texto(
+        referente
+    )
+
+    if texto in (
+        "y cuando",
+        "cuando",
+    ):
+        pares_tiempo = (
+            ("el mes que viene", "El mes que viene."),
+            ("el proximo mes", "El próximo mes."),
+            ("la semana que viene", "La semana que viene."),
+            ("la proxima semana", "La próxima semana."),
+            ("pasado manana", "Pasado mañana."),
+            ("manana", "Mañana."),
+            ("hoy", "Hoy."),
+            ("esta semana", "Esta semana."),
+            ("este mes", "Este mes."),
+        )
+
+        for expresion, respuesta in pares_tiempo:
+            if expresion in referente_normalizado:
+                return respuesta
+
+        return (
+            "En ese mensaje no habías especificado cuándo."
+        )
+
+    if texto in (
+        "y donde",
+        "donde",
+    ):
+        patrones = (
+            r"\bviaj(?:ar|o|ando)\s+a\s+([^,.]+)",
+            r"\b(?:ir|voy|yendo)\s+a\s+([^,.]+)",
+            r"\b(?:volver|vuelvo)\s+a\s+([^,.]+)",
+            r"\b(?:mudarme|mudarse)\s+a\s+([^,.]+)",
+        )
+
+        for patron in patrones:
+            coincidencia = re.search(
+                patron,
+                referente,
+                flags=re.IGNORECASE,
+            )
+
+            if not coincidencia:
+                continue
+
+            lugar = coincidencia.group(1).strip()
+
+            cortes = (
+                " el mes que viene",
+                " el próximo mes",
+                " el proximo mes",
+                " la semana que viene",
+                " la próxima semana",
+                " la proxima semana",
+                " mañana",
+                " manana",
+                " pasado mañana",
+                " pasado manana",
+                " hoy",
+            )
+
+            lugar_normalizado = normalizar_texto(
+                lugar
+            )
+
+            posiciones = []
+
+            for corte in cortes:
+                pos = lugar_normalizado.find(
+                    normalizar_texto(corte)
+                )
+
+                if pos >= 0:
+                    posiciones.append(pos)
+
+            if posiciones:
+                lugar = lugar[
+                    :min(posiciones)
+                ].strip()
+
+            lugar = lugar.strip(
+                " .,-"
+            )
+
+            if lugar:
+                return f"En {lugar}."
+
+        return (
+            "En ese mensaje no habías especificado dónde."
+        )
+
+    if texto in (
+        "y con quien",
+        "con quien",
+    ):
+        coincidencia = re.search(
+            r"\bcon\s+([^,.]+)",
+            referente,
+            flags=re.IGNORECASE,
+        )
+
+        if coincidencia:
+            persona = coincidencia.group(1).strip(
+                " .,-"
+            )
+
+            return f"Con {persona}."
+
+        return (
+            "En ese mensaje no habías especificado con quién."
+        )
+
+    return None
+
+
+def es_limpieza_contexto_conversacional(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    expresiones = (
+        "olvida esta conversacion",
+        "olvidate de esta conversacion",
+        "borra el contexto de esta conversacion",
+        "limpia el contexto de esta conversacion",
+        "limpia la conversacion reciente",
+        "reinicia el contexto conversacional",
+    )
+
+    return any(
+        expresion in texto
+        for expresion in expresiones
+    )
+
+
+def limpiar_contexto_conversacional_desde_hermes():
+    cantidad = limpiar_historial_conversacion()
+    limpiar_resumen_contexto()
+
+    return (
+        "Listo. Limpié el contexto conversacional reciente "
+        f"({cantidad} mensajes). La memoria permanente no fue modificada."
+    )
 
 
 PROMPT_SISTEMA = """
@@ -10689,6 +11330,59 @@ def procesar_comandos_directos(
         mensaje
     )
 
+    if es_referencia_natural_corta(
+        mensaje
+    ):
+        respuesta_referencia = resolver_referencia_natural_corta(
+            mensaje
+        )
+
+        if respuesta_referencia is not None:
+            confirmacion_pendiente = None
+            ultimo_contexto_edicion = None
+
+            return respuesta_referencia
+
+    if es_auditoria_contexto_conversacional(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return auditar_contexto_conversacional()
+
+    if es_reparacion_contexto_conversacional(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return reparar_contexto_conversacional()
+
+    if es_comando_compactar_contexto(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return compactar_contexto_conversacional(
+            forzar=True
+        )
+
+    if es_consulta_estado_contexto(
+        mensaje
+    ):
+        return mostrar_estado_contexto()
+
+    if es_limpieza_contexto_conversacional(
+        mensaje
+    ):
+
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return limpiar_contexto_conversacional_desde_hermes()
+
     if es_auditoria_resumen_nocturno(
         mensaje
     ):
@@ -11547,6 +12241,40 @@ def elegir_modelo(
 # IA
 # ==========================================================
 
+def limpiar_respuesta_modelo(
+    respuesta,
+    mensaje_usuario=None,
+):
+    texto = str(
+        respuesta
+    ).strip()
+
+    if mensaje_usuario:
+        mensaje = str(
+            mensaje_usuario
+        ).strip()
+
+        if texto.lower().endswith(
+            mensaje.lower()
+        ):
+            texto = texto[
+                :len(texto) - len(mensaje)
+            ].rstrip(
+                " \n\t-–—:;"
+            )
+
+    # El modelo pequeño a veces agrega una pregunta de seguimiento
+    # no solicitada. La quitamos si aparece al final.
+    texto = re.sub(
+        r"\s*¿Y\b[^?]*\?\s*$",
+        "",
+        texto,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    return texto
+
+
 def consultar_hermes(
     mensaje
 ):
@@ -11581,7 +12309,16 @@ TAREAS:
 EVENTOS:
 {obtener_texto_eventos()}
 
-MENSAJE DE LEO:
+RESUMEN DE CONTEXTO ANTERIOR:
+{obtener_texto_resumen_contexto()}
+
+CONVERSACIÓN RECIENTE:
+{obtener_texto_contexto_conversacional()}
+
+REFERENTE MÁS RECIENTE:
+{obtener_referente_conversacional_reciente()}
+
+MENSAJE ACTUAL DE LEO:
 {mensaje}
 
 Respondé solamente con JSON válido:
@@ -11604,8 +12341,25 @@ Acciones:
 "crear_tarea"
 "crear_evento"
 
+Usá la CONVERSACIÓN RECIENTE para entender referencias,
+pronombres y continuaciones del tema anterior.
+
+Cuando respondas usando la conversación reciente:
+- contestá solamente a la pregunta actual;
+- no repitas la pregunta de Leo al final;
+- no agregues preguntas que Leo no hizo;
+- no copies texto de turnos anteriores salvo que sea necesario para responder;
+- si recordás un dato reciente, respondelo de forma natural y breve;
+- resolvé referencias naturales como "eso", "ese", "esa", "lo anterior",
+  "¿y cuándo?", "¿y dónde?", "¿y con quién?" usando primero
+  REFERENTE MÁS RECIENTE y después CONVERSACIÓN RECIENTE;
+- si una referencia puede corresponder a más de una cosa, pedí aclaración breve;
+- una referencia conversacional nunca autoriza por sí sola a crear,
+  modificar o borrar tareas, eventos o recordatorios.
+
 No inventes una tarea o evento a partir de una respuesta
 corta que dependa de una conversación anterior.
+Para crear o modificar datos, la intención debe seguir siendo explícita.
 
 No escribas nada fuera del JSON.
 """
@@ -11656,6 +12410,11 @@ No escribas nada fuera del JSON.
         "No pude generar una respuesta.",
     )
 
+    respuesta = limpiar_respuesta_modelo(
+        respuesta,
+        mensaje
+    )
+
     accion = resultado.get(
         "accion",
         "ninguna",
@@ -11667,11 +12426,10 @@ No escribas nada fuera del JSON.
             mensaje
         )
     ):
-
-        return (
-            "No veo una solicitud explícita para crear "
-            "una tarea, así que no guardé nada."
-        )
+        # El modelo puede interpretar una frase descriptiva
+        # como una posible tarea. En ese caso no ejecutamos
+        # ninguna acción, pero conservamos su respuesta natural.
+        accion = "ninguna"
 
     if (
         accion == "crear_evento"
@@ -11679,11 +12437,10 @@ No escribas nada fuera del JSON.
             mensaje
         )
     ):
-
-        return (
-            "No veo una solicitud explícita para crear "
-            "un evento, así que no guardé nada."
-        )
+        # Igual que con las tareas: una intención o comentario
+        # no debe convertirse automáticamente en un evento.
+        # Solo bloqueamos la acción; no reemplazamos la respuesta.
+        accion = "ninguna"
 
     if accion == "crear_tarea":
 
@@ -11890,6 +12647,10 @@ print("⚠️ Detección de conflictos de agenda: activa")
 print("🛑 Advertencia de conflictos al crear eventos: activa")
 print("↔️ Advertencia de conflictos al mover eventos: activa")
 print("🧪 Auditoría avanzada de conflictos de agenda: activa")
+print("🧠 Contexto conversacional profundo: activo")
+print("🔗 Referencias naturales de conversación: activas")
+print("🗜️ Compresión automática del contexto: activa")
+print("🧪 Auditoría y limpieza del contexto: activas")
 print()
 print("Escribí 'salir' para terminar.")
 print()
@@ -11918,6 +12679,21 @@ while True:
         respuesta = consultar_hermes(
             mensaje
         )
+
+        if not es_comando_mantenimiento_contexto(
+            mensaje
+        ):
+            guardar_mensaje_conversacion(
+                "usuario",
+                mensaje,
+            )
+
+            guardar_mensaje_conversacion(
+                "asistente",
+                respuesta,
+            )
+
+            compactar_contexto_conversacional()
 
         print()
         print(

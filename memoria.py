@@ -50,6 +50,43 @@ def crear_base():
         """)
 
     # ------------------------------------------------------
+    # HISTORIAL CONVERSACIONAL
+    # ------------------------------------------------------
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historial_conversacion (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rol TEXT NOT NULL,
+            contenido TEXT NOT NULL,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_historial_conversacion_id
+        ON historial_conversacion (id)
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS resumen_contexto (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            contenido TEXT NOT NULL DEFAULT '',
+            mensajes_compactados INTEGER NOT NULL DEFAULT 0,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO resumen_contexto (
+            id,
+            contenido,
+            mensajes_compactados
+        )
+        VALUES (1, '', 0)
+    """)
+
+    # ------------------------------------------------------
     # TAREAS
     # ------------------------------------------------------
 
@@ -274,6 +311,418 @@ def obtener_recuerdos():
     conexion.close()
 
     return resultados
+
+
+# ==========================================================
+# HISTORIAL CONVERSACIONAL
+# ==========================================================
+
+def guardar_mensaje_conversacion(
+    rol,
+    contenido
+):
+    rol = str(
+        rol
+    ).strip().lower()
+
+    contenido = str(
+        contenido
+    ).strip()
+
+    if rol not in (
+        "usuario",
+        "asistente",
+    ):
+        raise ValueError(
+            "Rol de conversación inválido."
+        )
+
+    if not contenido:
+        return None
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        INSERT INTO historial_conversacion (
+            rol,
+            contenido
+        )
+        VALUES (?, ?)
+    """, (
+        rol,
+        contenido,
+    ))
+
+    mensaje_id = cursor.lastrowid
+
+    conexion.commit()
+    conexion.close()
+
+    return mensaje_id
+
+
+def obtener_historial_conversacion(
+    limite=8
+):
+    try:
+        limite = int(
+            limite
+        )
+
+    except (TypeError, ValueError):
+        limite = 8
+
+    limite = max(
+        1,
+        min(
+            limite,
+            40,
+        )
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            rol,
+            contenido,
+            fecha_creacion
+        FROM historial_conversacion
+        ORDER BY id DESC
+        LIMIT ?
+    """, (
+        limite,
+    ))
+
+    resultados = list(
+        reversed(
+            cursor.fetchall()
+        )
+    )
+
+    conexion.close()
+
+    return resultados
+
+
+def limpiar_historial_conversacion():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        DELETE FROM historial_conversacion
+    """)
+
+    cantidad = cursor.rowcount
+
+    conexion.commit()
+    conexion.close()
+
+    return cantidad
+
+
+def contar_historial_conversacion():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM historial_conversacion
+    """)
+
+    cantidad = cursor.fetchone()[0]
+
+    conexion.close()
+
+    return int(
+        cantidad or 0
+    )
+
+
+def obtener_historial_antiguo(
+    limite
+):
+    limite = max(
+        1,
+        int(limite),
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            rol,
+            contenido,
+            fecha_creacion
+        FROM historial_conversacion
+        ORDER BY id ASC
+        LIMIT ?
+    """, (
+        limite,
+    ))
+
+    resultados = cursor.fetchall()
+
+    conexion.close()
+
+    return resultados
+
+
+def eliminar_historial_hasta(
+    mensaje_id
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        DELETE FROM historial_conversacion
+        WHERE id <= ?
+    """, (
+        int(mensaje_id),
+    ))
+
+    cantidad = cursor.rowcount
+
+    conexion.commit()
+    conexion.close()
+
+    return cantidad
+
+
+def obtener_resumen_contexto():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            contenido,
+            mensajes_compactados,
+            fecha_actualizacion
+        FROM resumen_contexto
+        WHERE id = 1
+    """)
+
+    fila = cursor.fetchone()
+
+    conexion.close()
+
+    if not fila:
+        return (
+            "",
+            0,
+            None,
+        )
+
+    return fila
+
+
+def actualizar_resumen_contexto(
+    contenido,
+    incremento=0
+):
+    contenido = str(
+        contenido or ""
+    ).strip()
+
+    incremento = max(
+        0,
+        int(incremento),
+    )
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE resumen_contexto
+        SET
+            contenido = ?,
+            mensajes_compactados =
+                mensajes_compactados + ?,
+            fecha_actualizacion =
+                CURRENT_TIMESTAMP
+        WHERE id = 1
+    """, (
+        contenido,
+        incremento,
+    ))
+
+    conexion.commit()
+    conexion.close()
+
+
+def limpiar_resumen_contexto():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE resumen_contexto
+        SET
+            contenido = '',
+            mensajes_compactados = 0,
+            fecha_actualizacion =
+                CURRENT_TIMESTAMP
+        WHERE id = 1
+    """)
+
+    conexion.commit()
+    conexion.close()
+
+
+
+
+def auditar_contexto_conversacional_db():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    total = cursor.execute("""
+        SELECT COUNT(*)
+        FROM historial_conversacion
+    """).fetchone()[0]
+
+    roles_invalidos = cursor.execute("""
+        SELECT COUNT(*)
+        FROM historial_conversacion
+        WHERE rol NOT IN ('usuario', 'asistente')
+    """).fetchone()[0]
+
+    vacios = cursor.execute("""
+        SELECT COUNT(*)
+        FROM historial_conversacion
+        WHERE TRIM(COALESCE(contenido, '')) = ''
+    """).fetchone()[0]
+
+    fila_resumen = cursor.execute("""
+        SELECT
+            contenido,
+            mensajes_compactados
+        FROM resumen_contexto
+        WHERE id = 1
+    """).fetchone()
+
+    resumen_faltante = fila_resumen is None
+
+    if fila_resumen:
+        contenido_resumen = str(
+            fila_resumen[0] or ""
+        )
+
+        mensajes_compactados = int(
+            fila_resumen[1] or 0
+        )
+    else:
+        contenido_resumen = ""
+        mensajes_compactados = 0
+
+    resumen_demasiado_largo = (
+        len(contenido_resumen) > 6000
+    )
+
+    compactados_invalidos = (
+        mensajes_compactados < 0
+    )
+
+    conexion.close()
+
+    return {
+        "total_recientes": int(total or 0),
+        "roles_invalidos": int(roles_invalidos or 0),
+        "mensajes_vacios": int(vacios or 0),
+        "resumen_faltante": bool(resumen_faltante),
+        "resumen_demasiado_largo": bool(
+            resumen_demasiado_largo
+        ),
+        "mensajes_compactados": int(
+            mensajes_compactados
+        ),
+        "compactados_invalidos": bool(
+            compactados_invalidos
+        ),
+    }
+
+
+def reparar_contexto_conversacional_db():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        DELETE FROM historial_conversacion
+        WHERE rol NOT IN ('usuario', 'asistente')
+           OR TRIM(COALESCE(contenido, '')) = ''
+    """)
+
+    eliminados = max(
+        0,
+        int(cursor.rowcount or 0),
+    )
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO resumen_contexto (
+            id,
+            contenido,
+            mensajes_compactados
+        )
+        VALUES (1, '', 0)
+    """)
+
+    cursor.execute("""
+        UPDATE resumen_contexto
+        SET mensajes_compactados = 0
+        WHERE id = 1
+          AND mensajes_compactados < 0
+    """)
+
+    fila = cursor.execute("""
+        SELECT contenido
+        FROM resumen_contexto
+        WHERE id = 1
+    """).fetchone()
+
+    resumen_recortado = False
+
+    if fila:
+        contenido = str(
+            fila[0] or ""
+        )
+
+        if len(contenido) > 6000:
+            contenido = contenido[-6000:]
+
+            primer_salto = contenido.find(
+                "\n"
+            )
+
+            if primer_salto >= 0:
+                contenido = contenido[
+                    primer_salto + 1:
+                ]
+
+            cursor.execute("""
+                UPDATE resumen_contexto
+                SET
+                    contenido = ?,
+                    fecha_actualizacion =
+                        CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (
+                contenido,
+            ))
+
+            resumen_recortado = True
+
+    conexion.commit()
+    conexion.close()
+
+    return {
+        "mensajes_eliminados": eliminados,
+        "resumen_recortado": resumen_recortado,
+    }
+
+
 
 
 # ==========================================================
