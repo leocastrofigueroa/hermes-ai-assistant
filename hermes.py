@@ -1,9 +1,14 @@
 import json
+import ipaddress
+import socket
 import re
 import unicodedata
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from html import unescape
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
@@ -106,6 +111,7 @@ crear_tabla_recordatorios()
 
 confirmacion_pendiente = None
 ultimo_contexto_edicion = None
+ultima_pagina_web = None
 
 
 MAX_MENSAJES_CONTEXTO = 8
@@ -8170,6 +8176,977 @@ def importar_calendario_desde_mensaje(
     )
 
 
+WEB_TIMEOUT_SEGUNDOS = 12
+WEB_RESULTADOS_MAXIMOS = 5
+
+
+class DuckDuckGoResultadosParser(
+    HTMLParser
+):
+    def __init__(
+        self
+    ):
+        super().__init__()
+        self.resultados = []
+        self._enlace = None
+        self._titulo = []
+        self._snippet = []
+        self._capturando_titulo = False
+        self._capturando_snippet = False
+
+    def handle_starttag(
+        self,
+        tag,
+        attrs
+    ):
+        atributos = dict(
+            attrs
+        )
+
+        clases = atributos.get(
+            "class",
+            "",
+        )
+
+        if (
+            tag == "a"
+            and "result__a" in clases
+        ):
+            self._enlace = atributos.get(
+                "href",
+                "",
+            )
+            self._titulo = []
+            self._capturando_titulo = True
+
+        elif (
+            tag in ("a", "div")
+            and "result__snippet" in clases
+        ):
+            self._snippet = []
+            self._capturando_snippet = True
+
+    def handle_endtag(
+        self,
+        tag
+    ):
+        if (
+            tag == "a"
+            and self._capturando_titulo
+        ):
+            self._capturando_titulo = False
+
+            if self._enlace:
+                self.resultados.append({
+                    "titulo": unescape(
+                        "".join(
+                            self._titulo
+                        )
+                    ).strip(),
+                    "url": limpiar_url_duckduckgo(
+                        self._enlace
+                    ),
+                    "snippet": "",
+                })
+
+        if (
+            tag in ("a", "div")
+            and self._capturando_snippet
+        ):
+            self._capturando_snippet = False
+
+            if self.resultados:
+                self.resultados[-1]["snippet"] = unescape(
+                    "".join(
+                        self._snippet
+                    )
+                ).strip()
+
+    def handle_data(
+        self,
+        data
+    ):
+        if self._capturando_titulo:
+            self._titulo.append(
+                data
+            )
+
+        if self._capturando_snippet:
+            self._snippet.append(
+                data
+            )
+
+
+def limpiar_url_duckduckgo(
+    url
+):
+    url = str(
+        url or ""
+    ).strip()
+
+    if not url:
+        return ""
+
+    if url.startswith("//"):
+        url = "https:" + url
+
+    try:
+        parsed = urlparse(
+            url
+        )
+
+        if "duckduckgo.com" in parsed.netloc:
+            parametros = parse_qs(
+                parsed.query
+            )
+            destino = parametros.get(
+                "uddg",
+                [],
+            )
+
+            if destino:
+                return unquote(
+                    destino[0]
+                )
+    except Exception:
+        pass
+
+    return url
+
+
+WEB_LECTURA_MAX_BYTES = 1_500_000
+WEB_LECTURA_MAX_CARACTERES = 12_000
+
+
+class PaginaTextoParser(
+    HTMLParser
+):
+    def __init__(
+        self
+    ):
+        super().__init__()
+        self.titulo = []
+        self.textos = []
+        self._en_titulo = False
+        self._ignorar = 0
+
+    def handle_starttag(
+        self,
+        tag,
+        attrs
+    ):
+        tag = tag.lower()
+
+        if tag == "title":
+            self._en_titulo = True
+
+        if tag in (
+            "script",
+            "style",
+            "noscript",
+            "svg",
+        ):
+            self._ignorar += 1
+
+    def handle_endtag(
+        self,
+        tag
+    ):
+        tag = tag.lower()
+
+        if tag == "title":
+            self._en_titulo = False
+
+        if (
+            tag in (
+                "script",
+                "style",
+                "noscript",
+                "svg",
+            )
+            and self._ignorar > 0
+        ):
+            self._ignorar -= 1
+
+    def handle_data(
+        self,
+        data
+    ):
+        if self._ignorar:
+            return
+
+        limpio = re.sub(
+            r"\s+",
+            " ",
+            str(
+                data or ""
+            ),
+        ).strip()
+
+        if not limpio:
+            return
+
+        if self._en_titulo:
+            self.titulo.append(
+                limpio
+            )
+        else:
+            self.textos.append(
+                limpio
+            )
+
+
+def host_web_seguro(
+    hostname
+):
+    hostname = str(
+        hostname or ""
+    ).strip().lower()
+
+    if not hostname:
+        return False
+
+    if hostname in (
+        "localhost",
+        "localhost.localdomain",
+    ):
+        return False
+
+    try:
+        direcciones = socket.getaddrinfo(
+            hostname,
+            None,
+        )
+    except socket.gaierror:
+        return False
+
+    ips = set()
+
+    for direccion in direcciones:
+        try:
+            ips.add(
+                ipaddress.ip_address(
+                    direccion[4][0]
+                )
+            )
+        except ValueError:
+            continue
+
+    if not ips:
+        return False
+
+    for ip in ips:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+
+    return True
+
+
+def validar_url_web_publica(
+    url
+):
+    try:
+        parsed = urlparse(
+            url
+        )
+    except Exception:
+        return (
+            False,
+            "La URL no es válida.",
+        )
+
+    if parsed.scheme not in (
+        "http",
+        "https",
+    ):
+        return (
+            False,
+            "Solo puedo abrir URLs http o https.",
+        )
+
+    if not parsed.hostname:
+        return (
+            False,
+            "La URL no tiene un dominio válido.",
+        )
+
+    if not host_web_seguro(
+        parsed.hostname
+    ):
+        return (
+            False,
+            "Por seguridad, no puedo acceder a direcciones locales, "
+            "privadas o internas.",
+        )
+
+    return (
+        True,
+        None,
+    )
+
+
+def es_lectura_web_controlada(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.match(
+            r"^(?:abre|abrir|lee|leer|visita|visitar)\s+"
+            r"(?:la\s+)?(?:pagina|web|url)?\s*https?://",
+            texto,
+        )
+    )
+
+
+def extraer_url_web(
+    mensaje
+):
+    coincidencia = re.search(
+        r"https?://[^\s]+",
+        str(
+            mensaje or ""
+        ),
+        flags=re.IGNORECASE,
+    )
+
+    if not coincidencia:
+        return ""
+
+    return coincidencia.group(0).rstrip(
+        ".,);]"
+    )
+
+
+def leer_pagina_web(
+    url
+):
+    global ultima_pagina_web
+    url = str(
+        url or ""
+    ).strip()
+
+    if not url:
+        return (
+            "Decime qué URL querés abrir."
+        )
+
+    segura, motivo = validar_url_web_publica(
+        url
+    )
+
+    if not segura:
+        return motivo
+
+    try:
+        respuesta = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 "
+                    "Chrome/120 Safari/537.36"
+                ),
+            },
+            timeout=WEB_TIMEOUT_SEGUNDOS,
+            allow_redirects=True,
+            stream=True,
+        )
+
+        respuesta.raise_for_status()
+
+        segura_final, motivo_final = validar_url_web_publica(
+            respuesta.url
+        )
+
+        if not segura_final:
+            return (
+                "La página redirigió a una dirección no permitida. "
+                + motivo_final
+            )
+
+        tipo = respuesta.headers.get(
+            "Content-Type",
+            "",
+        ).lower()
+
+        if not (
+            "text/html" in tipo
+            or "text/plain" in tipo
+            or "application/xhtml+xml" in tipo
+        ):
+            return (
+                "La URL no devuelve una página de texto compatible. "
+                f"Tipo recibido: {tipo or 'desconocido'}"
+            )
+
+        partes = []
+        total = 0
+
+        for bloque in respuesta.iter_content(
+            chunk_size=16_384
+        ):
+            if not bloque:
+                continue
+
+            total += len(
+                bloque
+            )
+
+            if total > WEB_LECTURA_MAX_BYTES:
+                return (
+                    "La página es demasiado grande para la lectura "
+                    "web controlada de Hermes."
+                )
+
+            partes.append(
+                bloque
+            )
+
+        bruto = b"".join(
+            partes
+        )
+
+        encoding = (
+            respuesta.encoding
+            or "utf-8"
+        )
+
+        html = bruto.decode(
+            encoding,
+            errors="replace",
+        )
+
+    except requests.RequestException as error:
+        return (
+            "No pude abrir esa página. "
+            f"Detalle: {error}"
+        )
+
+    parser = PaginaTextoParser()
+
+    try:
+        parser.feed(
+            html
+        )
+    except Exception as error:
+        return (
+            "La página respondió, pero no pude interpretar "
+            f"su contenido. Detalle: {error}"
+        )
+
+    titulo = " ".join(
+        parser.titulo
+    ).strip()
+
+    texto = "\n".join(
+        parser.textos
+    ).strip()
+
+    if not texto:
+        return (
+            "La página abrió correctamente, pero no encontré "
+            "texto legible."
+        )
+
+    if len(
+        texto
+    ) > WEB_LECTURA_MAX_CARACTERES:
+        texto = (
+            texto[
+                :WEB_LECTURA_MAX_CARACTERES
+            ]
+            + "\n\n[Contenido recortado por seguridad.]"
+        )
+
+    ultima_pagina_web = {
+        "url": respuesta.url,
+        "titulo": titulo,
+        "texto": texto,
+    }
+
+    lineas = [
+        f"URL: {respuesta.url}",
+    ]
+
+    if titulo:
+        lineas.append(
+            f"Título: {titulo}"
+        )
+
+    lineas.extend([
+        "",
+        texto,
+        "",
+        "La página se abrió únicamente porque la pediste explícitamente.",
+    ])
+
+    return "\n".join(
+        lineas
+    ).strip()
+
+
+def leer_web_desde_mensaje(
+    mensaje
+):
+    url = extraer_url_web(
+        mensaje
+    )
+
+    return leer_pagina_web(
+        url
+    )
+
+
+def es_resumen_ultima_pagina_web(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    ).strip()
+
+    expresiones = (
+        "resume la pagina",
+        "resumi la pagina",
+        "resumime la pagina",
+        "resume esta pagina",
+        "resumi esta pagina",
+        "resumime esta pagina",
+        "resume lo que lei",
+        "resumi lo que lei",
+        "resumime lo que lei",
+    )
+
+    return texto in expresiones
+
+
+def es_pregunta_sobre_ultima_pagina_web(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    ).strip()
+
+    prefijos = (
+        "segun la pagina",
+        "sobre la pagina",
+        "de la pagina",
+        "en la pagina",
+        "segun lo que lei",
+        "sobre lo que lei",
+    )
+
+    return any(
+        texto.startswith(
+            prefijo
+        )
+        for prefijo in prefijos
+    )
+
+
+def consultar_modelo_sobre_pagina(
+    instruccion,
+    modo="pregunta"
+):
+    global ultima_pagina_web
+
+    if not ultima_pagina_web:
+        return (
+            "Primero pedime que lea una página web concreta."
+        )
+
+    titulo = ultima_pagina_web.get(
+        "titulo",
+        "",
+    )
+
+    url = ultima_pagina_web.get(
+        "url",
+        "",
+    )
+
+    contenido = ultima_pagina_web.get(
+        "texto",
+        "",
+    )
+
+    if modo == "resumen":
+        tarea = (
+            "Resumí el contenido en español, de forma clara y breve. "
+            "Usá solamente la información de la fuente. "
+            "No agregues conocimiento externo ni inventes datos."
+        )
+    else:
+        tarea = (
+            "Respondé la pregunta en español usando solamente la fuente. "
+            "Si la respuesta no aparece o no puede sostenerse con la fuente, "
+            "decí claramente que la página no lo indica."
+        )
+
+    prompt = f"""
+Sos Hermes.
+
+FUENTE WEB:
+Título: {titulo}
+URL: {url}
+
+CONTENIDO:
+{contenido}
+
+TAREA:
+{tarea}
+
+INSTRUCCIÓN DEL USUARIO:
+{instruccion}
+
+Respondé solamente con la respuesta final, sin JSON, sin repetir
+estas instrucciones y sin agregar información externa.
+"""
+
+    datos = {
+        "model": MODELO_RAPIDO,
+        "prompt": prompt,
+        "stream": False,
+        "think": False,
+        "options": {
+            "temperature": 0.1,
+            "num_ctx": 8192,
+        },
+    }
+
+    print(
+        "Hermes 🌐 analizando página...",
+        flush=True,
+    )
+
+    try:
+        respuesta_http = requests.post(
+            OLLAMA_URL,
+            json=datos,
+            timeout=120,
+        )
+
+        respuesta_http.raise_for_status()
+
+        respuesta = (
+            respuesta_http
+            .json()
+            .get(
+                "response",
+                "",
+            )
+            .strip()
+        )
+
+    except requests.RequestException as error:
+        return (
+            "No pude analizar la página con el modelo local. "
+            f"Detalle: {error}"
+        )
+
+    if not respuesta:
+        return (
+            "No pude generar una respuesta sobre la página."
+        )
+
+    return respuesta
+
+
+def resumir_ultima_pagina_web():
+    return consultar_modelo_sobre_pagina(
+        "Resumí la página leída.",
+        modo="resumen",
+    )
+
+
+def preguntar_sobre_ultima_pagina_web(
+    mensaje
+):
+    return consultar_modelo_sobre_pagina(
+        mensaje,
+        modo="pregunta",
+    )
+
+
+def es_busqueda_web_controlada(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.match(
+            r"^(?:busca|buscar|investiga|investigar)\s+"
+            r"(?:en\s+)?(?:internet|la\s+web|web)\b",
+            texto,
+        )
+    )
+
+
+def extraer_consulta_web(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    coincidencia = re.match(
+        r"^\s*(?:busc[áa]|buscar|investig[áa]|investigar)\s+"
+        r"(?:en\s+)?(?:internet|la\s+web|web)\s*[:,-]?\s*(.+?)\s*$",
+        texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if not coincidencia:
+        return ""
+
+    return coincidencia.group(1).strip()
+
+
+def buscar_en_web(
+    consulta
+):
+    consulta = str(
+        consulta or ""
+    ).strip()
+
+    if not consulta:
+        return (
+            "Decime qué querés buscar en internet."
+        )
+
+    if len(
+        consulta
+    ) > 300:
+        return (
+            "La consulta web es demasiado larga. "
+            "Resumila en menos de 300 caracteres."
+        )
+
+    try:
+        respuesta = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={
+                "q": consulta,
+            },
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 "
+                    "Chrome/120 Safari/537.36"
+                ),
+            },
+            timeout=WEB_TIMEOUT_SEGUNDOS,
+        )
+
+        respuesta.raise_for_status()
+
+    except requests.RequestException as error:
+        return (
+            "No pude acceder a la web en este momento. "
+            f"Detalle: {error}"
+        )
+
+    parser = DuckDuckGoResultadosParser()
+
+    try:
+        parser.feed(
+            respuesta.text
+        )
+    except Exception as error:
+        return (
+            "La búsqueda respondió, pero no pude interpretar "
+            f"los resultados. Detalle: {error}"
+        )
+
+    resultados = [
+        resultado
+        for resultado in parser.resultados
+        if resultado.get(
+            "titulo"
+        )
+        and resultado.get(
+            "url"
+        )
+    ][:WEB_RESULTADOS_MAXIMOS]
+
+    if not resultados:
+        return (
+            "No encontré resultados web utilizables "
+            f"para: {consulta}"
+        )
+
+    lineas = [
+        f"Resultados web para: {consulta}",
+        "",
+    ]
+
+    for indice, resultado in enumerate(
+        resultados,
+        start=1,
+    ):
+        lineas.append(
+            f"{indice}. {resultado['titulo']}"
+        )
+
+        if resultado.get(
+            "snippet"
+        ):
+            lineas.append(
+                resultado["snippet"]
+            )
+
+        lineas.append(
+            resultado["url"]
+        )
+
+        lineas.append(
+            ""
+        )
+
+    lineas.append(
+        "La búsqueda web solo se ejecutó porque la pediste explícitamente."
+    )
+
+    return "\n".join(
+        lineas
+    ).strip()
+
+
+def buscar_web_desde_mensaje(
+    mensaje
+):
+    consulta = extraer_consulta_web(
+        mensaje
+    )
+
+    return buscar_en_web(
+        consulta
+    )
+
+
+def es_auditoria_acceso_web(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    ).strip()
+
+    expresiones = (
+        "audita el acceso web",
+        "auditar el acceso web",
+        "audita la web",
+        "auditar la web",
+        "revisa la seguridad web",
+        "revisar la seguridad web",
+    )
+
+    return texto in expresiones
+
+
+def auditar_acceso_web():
+    problemas = []
+
+    # 1) Una pregunta normal no debe activar acceso web.
+    if es_busqueda_web_controlada(
+        "Qué es Python"
+    ):
+        problemas.append(
+            "una consulta normal activa búsqueda web"
+        )
+
+    if es_lectura_web_controlada(
+        "Contame sobre python.org"
+    ):
+        problemas.append(
+            "una consulta normal activa lectura web"
+        )
+
+    # 2) Las órdenes explícitas sí deben activar las herramientas web.
+    if not es_busqueda_web_controlada(
+        "Buscá en internet Python 3.14"
+    ):
+        problemas.append(
+            "la búsqueda explícita no se detecta"
+        )
+
+    if not es_lectura_web_controlada(
+        "Leé la página https://www.python.org/"
+    ):
+        problemas.append(
+            "la lectura explícita no se detecta"
+        )
+
+    # 3) Protocolos no web deben quedar bloqueados.
+    segura, _ = validar_url_web_publica(
+        "file:///etc/passwd"
+    )
+
+    if segura:
+        problemas.append(
+            "se permite el protocolo file://"
+        )
+
+    # 4) Hosts locales e internos deben quedar bloqueados.
+    for url in (
+        "http://localhost/",
+        "http://127.0.0.1/",
+        "http://0.0.0.0/",
+    ):
+        segura, _ = validar_url_web_publica(
+            url
+        )
+
+        if segura:
+            problemas.append(
+                f"se permite una dirección local: {url}"
+            )
+
+    # 5) El resumen/preguntas no deben fingir contexto si no hay página.
+    if not callable(
+        resumir_ultima_pagina_web
+    ):
+        problemas.append(
+            "el resumen de páginas no está disponible"
+        )
+
+    if not callable(
+        preguntar_sobre_ultima_pagina_web
+    ):
+        problemas.append(
+            "las preguntas sobre páginas no están disponibles"
+        )
+
+    if problemas:
+        return (
+            "Encontré problemas en el acceso web: "
+            + "; ".join(
+                problemas
+            )
+            + "."
+        )
+
+    return (
+        "El acceso web está correcto. "
+        "Búsqueda explícita: OK. "
+        "Lectura explícita: OK. "
+        "Bloqueo de direcciones locales e internas: OK. "
+        "Resumen y preguntas sobre páginas: OK."
+    )
+
+
 def es_auditoria_calendario_externo(
     mensaje
 ):
@@ -13970,6 +14947,52 @@ def procesar_comandos_directos(
         mensaje
     )
 
+    if es_auditoria_acceso_web(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return auditar_acceso_web()
+
+    if es_resumen_ultima_pagina_web(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return resumir_ultima_pagina_web()
+
+    if es_pregunta_sobre_ultima_pagina_web(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return preguntar_sobre_ultima_pagina_web(
+            mensaje
+        )
+
+    if es_lectura_web_controlada(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return leer_web_desde_mensaje(
+            mensaje
+        )
+
+    if es_busqueda_web_controlada(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return buscar_web_desde_mensaje(
+            mensaje
+        )
+
     if es_auditoria_calendario_externo(
         mensaje
     ):
@@ -15506,6 +16529,10 @@ print("📥 Importación de calendarios externos (.ics): activa")
 print("🔄 Sincronización segura por UID y deduplicación: activa")
 print("✅ Auditoría de integración de calendario: activa")
 print("🕒 Importación exacta de horarios de calendario: activa")
+print("🌐 Búsqueda web controlada y explícita: activa")
+print("📖 Lectura controlada de páginas web públicas: activa")
+print("🧠 Resumen y preguntas sobre la última página web: activos")
+print("🛡️ Auditoría de acceso web controlado: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()

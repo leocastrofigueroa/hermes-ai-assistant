@@ -1308,6 +1308,7 @@ def enviar_notificacion(
     )
 
 
+
 # ==========================================================
 # RESUMEN DIARIO AUTOMÁTICO
 # ==========================================================
@@ -2023,7 +2024,6 @@ def revisar_resumen_diario():
 
     return True
 
-
 def probar_resumen_diario():
     resumen = generar_resumen_diario_motor()
 
@@ -2044,6 +2044,7 @@ def probar_resumen_diario():
         "La prueba no marca el resumen de hoy como enviado."
     )
     print()
+
 
 
 # ==========================================================
@@ -2807,7 +2808,6 @@ def revisar_resumen_nocturno():
 
     return True
 
-
 def probar_resumen_nocturno():
     resumen = generar_resumen_nocturno_motor()
 
@@ -2959,7 +2959,7 @@ def ejecutar_motor():
             print(
                 "Motor de recordatorios detenido."
             )
-            break
+            break 
 
 
 if __name__ == "__main__":
