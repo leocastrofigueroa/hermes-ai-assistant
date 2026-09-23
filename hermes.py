@@ -2,7 +2,7 @@ import json
 import re
 import unicodedata
 from difflib import SequenceMatcher
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -61,6 +61,10 @@ from memoria import (
     obtener_eventos_por_fecha,
     obtener_eventos_entre_fechas,
     obtener_evento_por_id,
+    obtener_evento_por_external_uid,
+    asignar_external_uid_evento,
+    actualizar_evento_desde_calendario,
+    auditar_integracion_calendario_db,
     modificar_evento,
     cancelar_evento,
 )
@@ -7530,6 +7534,733 @@ def validar_ruta_escritura_local(
     )
 
 
+def escapar_ics(
+    texto
+):
+    texto = str(
+        texto or ""
+    )
+
+    texto = texto.replace(
+        "\\",
+        "\\\\",
+    )
+
+    texto = texto.replace(
+        ";",
+        "\\;",
+    )
+
+    texto = texto.replace(
+        ",",
+        "\\,",
+    )
+
+    texto = texto.replace(
+        "\r\n",
+        "\\n",
+    ).replace(
+        "\n",
+        "\\n",
+    )
+
+    return texto
+
+
+def generar_ics_eventos(
+    eventos
+):
+    lineas = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Hermes//Calendario//ES",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+    ]
+
+    ahora = datetime.now(timezone.utc).strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
+
+    for evento in eventos:
+        evento_id = evento[0]
+        titulo = evento[1]
+        descripcion = evento[2] or ""
+        fecha = evento[3]
+        hora_inicio = evento[4]
+        hora_fin = evento[5]
+
+        lineas.append(
+            "BEGIN:VEVENT"
+        )
+
+        lineas.append(
+            f"UID:hermes-{evento_id}@local"
+        )
+
+        lineas.append(
+            f"DTSTAMP:{ahora}"
+        )
+
+        if hora_inicio:
+            inicio = datetime.strptime(
+                f"{fecha} {hora_inicio}",
+                "%Y-%m-%d %H:%M",
+            )
+
+            lineas.append(
+                "DTSTART:"
+                + inicio.strftime(
+                    "%Y%m%dT%H%M%S"
+                )
+            )
+
+            if hora_fin:
+                fin = datetime.strptime(
+                    f"{fecha} {hora_fin}",
+                    "%Y-%m-%d %H:%M",
+                )
+            else:
+                fin = inicio + timedelta(
+                    hours=1
+                )
+
+            lineas.append(
+                "DTEND:"
+                + fin.strftime(
+                    "%Y%m%dT%H%M%S"
+                )
+            )
+
+        else:
+            fecha_dt = datetime.strptime(
+                fecha,
+                "%Y-%m-%d",
+            )
+
+            lineas.append(
+                "DTSTART;VALUE=DATE:"
+                + fecha_dt.strftime(
+                    "%Y%m%d"
+                )
+            )
+
+            fecha_fin = fecha_dt + timedelta(
+                days=1
+            )
+
+            lineas.append(
+                "DTEND;VALUE=DATE:"
+                + fecha_fin.strftime(
+                    "%Y%m%d"
+                )
+            )
+
+        lineas.append(
+            f"SUMMARY:{escapar_ics(titulo)}"
+        )
+
+        if descripcion:
+            lineas.append(
+                f"DESCRIPTION:{escapar_ics(descripcion)}"
+            )
+
+        lineas.append(
+            "END:VEVENT"
+        )
+
+    lineas.append(
+        "END:VCALENDAR"
+    )
+
+    return "\r\n".join(
+        lineas
+    ) + "\r\n"
+
+
+def exportar_calendario_ics(
+    ruta="hermes-calendario.ics"
+):
+    eventos = obtener_eventos_activos()
+
+    if not eventos:
+        return (
+            "No hay eventos activos para exportar."
+        )
+
+    path = resolver_ruta_archivo_local(
+        ruta
+    )
+
+    if path is None:
+        return (
+            "No pude resolver la ruta del calendario."
+        )
+
+    permitido, motivo = validar_ruta_escritura_local(
+        path
+    )
+
+    if not permitido:
+        return motivo
+
+    if path.suffix.lower() != ".ics":
+        path = path.with_suffix(
+            ".ics"
+        )
+
+    contenido = generar_ics_eventos(
+        eventos
+    )
+
+    try:
+        path.write_text(
+            contenido,
+            encoding="utf-8",
+            newline="",
+        )
+    except OSError as error:
+        return (
+            f"No pude exportar el calendario: {error}"
+        )
+
+    return (
+        f"Listo. Exporté {len(eventos)} eventos "
+        f"al archivo: {path}"
+    )
+
+
+def es_exportacion_calendario(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    expresiones = (
+        "exporta el calendario",
+        "exportar el calendario",
+        "exporta mi calendario",
+        "exportar mi calendario",
+        "genera el calendario ics",
+        "generar calendario ics",
+    )
+
+    return any(
+        expresion in texto
+        for expresion in expresiones
+    )
+
+
+def exportar_calendario_desde_mensaje(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    coincidencia = re.search(
+        r"\b(?:como|a|en)\s+([^\s]+\.ics)\s*$",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    ruta = (
+        coincidencia.group(1)
+        if coincidencia
+        else "hermes-calendario.ics"
+    )
+
+    return exportar_calendario_ics(
+        ruta
+    )
+
+
+def desescapar_ics(
+    texto
+):
+    return (
+        str(texto or "")
+        .replace("\\n", "\n")
+        .replace("\\N", "\n")
+        .replace("\\,", ",")
+        .replace("\\;", ";")
+        .replace("\\\\", "\\")
+    )
+
+
+def desplegar_lineas_ics(
+    contenido
+):
+    lineas = []
+
+    for linea in str(
+        contenido or ""
+    ).splitlines():
+        if (
+            linea.startswith(" ")
+            or linea.startswith("\t")
+        ) and lineas:
+            lineas[-1] += linea[1:]
+        else:
+            lineas.append(
+                linea.rstrip("\r")
+            )
+
+    return lineas
+
+
+def parsear_fecha_hora_ics(
+    valor,
+    parametros=""
+):
+    valor = str(
+        valor or ""
+    ).strip()
+
+    parametros = str(
+        parametros or ""
+    ).upper()
+
+    if not valor:
+        return None, None
+
+    if (
+        "VALUE=DATE" in parametros
+        or re.fullmatch(
+            r"\d{8}",
+            valor,
+        )
+    ):
+        try:
+            fecha = datetime.strptime(
+                valor[:8],
+                "%Y%m%d",
+            ).date()
+
+            return (
+                fecha.isoformat(),
+                None,
+            )
+        except ValueError:
+            return None, None
+
+    valor_limpio = valor.rstrip(
+        "Z"
+    )
+
+    formatos = (
+        "%Y%m%dT%H%M%S",
+        "%Y%m%dT%H%M",
+    )
+
+    for formato in formatos:
+        try:
+            fecha_hora = datetime.strptime(
+                valor_limpio,
+                formato,
+            )
+
+            return (
+                fecha_hora.date().isoformat(),
+                fecha_hora.strftime(
+                    "%H:%M"
+                ),
+            )
+        except ValueError:
+            continue
+
+    return None, None
+
+
+def extraer_eventos_ics(
+    contenido
+):
+    lineas = desplegar_lineas_ics(
+        contenido
+    )
+
+    eventos = []
+    actual = None
+
+    for linea in lineas:
+        if linea == "BEGIN:VEVENT":
+            actual = {}
+            continue
+
+        if linea == "END:VEVENT":
+            if actual is not None:
+                eventos.append(
+                    actual
+                )
+            actual = None
+            continue
+
+        if actual is None:
+            continue
+
+        if ":" not in linea:
+            continue
+
+        cabecera, valor = linea.split(
+            ":",
+            1,
+        )
+
+        partes = cabecera.split(
+            ";"
+        )
+
+        clave = partes[0].upper()
+        parametros = ";".join(
+            partes[1:]
+        )
+
+        actual[clave] = (
+            parametros,
+            valor,
+        )
+
+    return eventos
+
+
+def importar_calendario_ics(
+    ruta
+):
+    path = resolver_ruta_archivo_local(
+        ruta
+    )
+
+    if path is None:
+        return "Decime qué archivo .ics querés importar."
+
+    if not path.exists():
+        return f"No encontré el archivo: {path}"
+
+    if not path.is_file():
+        return f"Esa ruta no es un archivo: {path}"
+
+    if path.suffix.lower() != ".ics":
+        return "El archivo debe tener extensión .ics."
+
+    try:
+        contenido = path.read_text(
+            encoding="utf-8-sig"
+        )
+    except UnicodeDecodeError:
+        contenido = path.read_text(
+            encoding="latin-1"
+        )
+    except OSError as error:
+        return f"No pude leer el calendario: {error}"
+
+    eventos_ics = extraer_eventos_ics(
+        contenido
+    )
+
+    if not eventos_ics:
+        return "No encontré eventos VEVENT en ese archivo."
+
+    importados = 0
+    actualizados = 0
+    duplicados = 0
+    omitidos = 0
+
+    for evento_ics in eventos_ics:
+        summary = evento_ics.get(
+            "SUMMARY",
+            ("", ""),
+        )[1]
+
+        descripcion = evento_ics.get(
+            "DESCRIPTION",
+            ("", ""),
+        )[1]
+
+        uid = evento_ics.get(
+            "UID",
+            ("", ""),
+        )[1].strip()
+
+        inicio = evento_ics.get(
+            "DTSTART"
+        )
+
+        if not summary or not inicio:
+            omitidos += 1
+            continue
+
+        fecha, hora_inicio = parsear_fecha_hora_ics(
+            inicio[1],
+            inicio[0],
+        )
+
+        if not fecha:
+            omitidos += 1
+            continue
+
+        hora_fin = None
+
+        fin = evento_ics.get(
+            "DTEND"
+        )
+
+        if fin:
+            fecha_fin, hora_fin_parseada = parsear_fecha_hora_ics(
+                fin[1],
+                fin[0],
+            )
+
+            if hora_fin_parseada and fecha_fin == fecha:
+                hora_fin = hora_fin_parseada
+
+        titulo = desescapar_ics(
+            summary
+        ).strip()
+
+        descripcion = desescapar_ics(
+            descripcion
+        ).strip()
+
+        evento_objetivo = None
+
+        if uid:
+            match_hermes = re.fullmatch(
+                r"hermes-(\d+)@local",
+                uid,
+                flags=re.IGNORECASE,
+            )
+
+            if match_hermes:
+                evento_objetivo = obtener_evento_por_id(
+                    int(match_hermes.group(1))
+                )
+            else:
+                evento_objetivo = obtener_evento_por_external_uid(
+                    uid
+                )
+
+        if evento_objetivo:
+            if evento_objetivo[6] != "activo":
+                duplicados += 1
+                continue
+
+            cambios = (
+                evento_objetivo[1] != titulo
+                or (evento_objetivo[2] or "") != descripcion
+                or evento_objetivo[3] != fecha
+                or evento_objetivo[4] != hora_inicio
+                or evento_objetivo[5] != hora_fin
+            )
+
+            if cambios:
+                actualizar_evento_desde_calendario(
+                    evento_objetivo[0],
+                    titulo=titulo,
+                    descripcion=descripcion,
+                    fecha=fecha,
+                    hora_inicio=hora_inicio,
+                    hora_fin=hora_fin,
+                )
+                actualizados += 1
+            else:
+                duplicados += 1
+
+            if uid:
+                asignar_external_uid_evento(
+                    evento_objetivo[0],
+                    uid,
+                )
+
+            continue
+
+        candidatos = [
+            evento
+            for evento in obtener_eventos_activos()
+            if str(evento[1] or "").strip().lower() == titulo.lower()
+            and evento[3] == fecha
+            and evento[4] == hora_inicio
+        ]
+
+        if candidatos:
+            evento_objetivo = candidatos[0]
+
+            cambios = (
+                (evento_objetivo[2] or "") != descripcion
+                or evento_objetivo[5] != hora_fin
+            )
+
+            if cambios:
+                actualizar_evento_desde_calendario(
+                    evento_objetivo[0],
+                    titulo=titulo,
+                    descripcion=descripcion,
+                    fecha=fecha,
+                    hora_inicio=hora_inicio,
+                    hora_fin=hora_fin,
+                )
+                actualizados += 1
+            else:
+                duplicados += 1
+
+            if uid:
+                asignar_external_uid_evento(
+                    evento_objetivo[0],
+                    uid,
+                )
+
+            continue
+
+        crear_evento(
+            titulo=titulo,
+            fecha=fecha,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+            descripcion=descripcion,
+            external_uid=uid or None,
+        )
+
+        importados += 1
+
+    return (
+        f"Calendario procesado: {len(eventos_ics)} eventos. "
+        f"Importados: {importados}. "
+        f"Actualizados: {actualizados}. "
+        f"Duplicados omitidos: {duplicados}. "
+        f"Inválidos omitidos: {omitidos}."
+    )
+
+
+def es_importacion_calendario(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    return bool(
+        re.search(
+            r"^(?:importa|importar|carga|cargar)\s+"
+            r"(?:el\s+)?calendario\b",
+            texto,
+        )
+    )
+
+
+def importar_calendario_desde_mensaje(
+    mensaje
+):
+    texto = str(
+        mensaje or ""
+    ).strip()
+
+    coincidencia = re.search(
+        r"([^\s\"']+\.ics)\s*$",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    if not coincidencia:
+        return (
+            "Decime qué archivo .ics querés importar."
+        )
+
+    return importar_calendario_ics(
+        coincidencia.group(1)
+    )
+
+
+def es_auditoria_calendario_externo(
+    mensaje
+):
+    texto = normalizar_texto(
+        mensaje
+    )
+
+    expresiones = (
+        "audita el calendario externo",
+        "auditar el calendario externo",
+        "audita la integracion de calendario",
+        "auditar la integracion de calendario",
+        "revisa el calendario externo",
+        "revisar el calendario externo",
+    )
+
+    return any(
+        expresion in texto
+        for expresion in expresiones
+    )
+
+
+def auditar_calendario_externo():
+    auditoria_db = auditar_integracion_calendario_db()
+
+    if not auditoria_db["correcto"]:
+        return (
+            "Encontré problemas en la integración de calendario: "
+            + "; ".join(
+                auditoria_db["problemas"]
+            )
+            + "."
+        )
+
+    eventos = obtener_eventos_activos()
+
+    contenido = generar_ics_eventos(
+        eventos
+    )
+
+    eventos_ics = extraer_eventos_ics(
+        contenido
+    )
+
+    if len(
+        eventos_ics
+    ) != len(
+        eventos
+    ):
+        return (
+            "Encontré un problema: la exportación ICS no conserva "
+            "la misma cantidad de eventos activos."
+        )
+
+    uids = []
+
+    for evento_ics in eventos_ics:
+        uid = evento_ics.get(
+            "UID",
+            ("", ""),
+        )[1].strip()
+
+        if not uid:
+            return (
+                "Encontré un problema: hay eventos exportados sin UID."
+            )
+
+        uids.append(
+            uid
+        )
+
+    if len(
+        uids
+    ) != len(
+        set(
+            uids
+        )
+    ):
+        return (
+            "Encontré un problema: la exportación genera UID duplicados."
+        )
+
+    return (
+        "La integración de calendario está correcta. "
+        f"Eventos activos verificables: {len(eventos)}. "
+        f"Eventos con UID externo guardado: "
+        f"{auditoria_db['eventos_con_uid']}. "
+        "Exportación ICS, UID y deduplicación: OK."
+    )
+
+
 def es_auditoria_archivos_locales(
     mensaje
 ):
@@ -13239,6 +13970,34 @@ def procesar_comandos_directos(
         mensaje
     )
 
+    if es_auditoria_calendario_externo(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return auditar_calendario_externo()
+
+    if es_importacion_calendario(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return importar_calendario_desde_mensaje(
+            mensaje
+        )
+
+    if es_exportacion_calendario(
+        mensaje
+    ):
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+
+        return exportar_calendario_desde_mensaje(
+            mensaje
+        )
+
     if es_auditoria_archivos_locales(
         mensaje
     ):
@@ -14742,6 +15501,11 @@ print("📄 Lectura de archivos de texto locales: activa")
 print("📁 Listado de archivos y carpetas locales: activo")
 print("✍️ Creación, edición y eliminación de archivos de texto: activas")
 print("🛡️ Seguridad y auditoría de archivos locales: activas")
+print("📆 Exportación de calendario externo (.ics): activa")
+print("📥 Importación de calendarios externos (.ics): activa")
+print("🔄 Sincronización segura por UID y deduplicación: activa")
+print("✅ Auditoría de integración de calendario: activa")
+print("🕒 Importación exacta de horarios de calendario: activa")
 print()
 print("Escribí 'salir' para terminar.")
 print()

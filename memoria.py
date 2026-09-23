@@ -245,6 +245,19 @@ def crear_base():
             ADD COLUMN fecha_ocurrencia TEXT
         """)
 
+    if "external_uid" not in columnas_eventos:
+        cursor.execute("""
+            ALTER TABLE eventos
+            ADD COLUMN external_uid TEXT
+        """)
+
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_eventos_external_uid
+        ON eventos (external_uid)
+        WHERE external_uid IS NOT NULL
+    """)
+
     cursor.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS
         idx_eventos_recurrentes_ocurrencia
@@ -2772,7 +2785,8 @@ def crear_evento(
     hora_fin=None,
     descripcion="",
     recurrente_id=None,
-    fecha_ocurrencia=None
+    fecha_ocurrencia=None,
+    external_uid=None
 ):
     conexion = conectar()
     cursor = conexion.cursor()
@@ -2786,9 +2800,10 @@ def crear_evento(
             hora_fin,
             estado,
             recurrente_id,
-            fecha_ocurrencia
+            fecha_ocurrencia,
+            external_uid
         )
-        VALUES (?, ?, ?, ?, ?, 'activo', ?, ?)
+        VALUES (?, ?, ?, ?, ?, 'activo', ?, ?, ?)
     """, (
         titulo.strip(),
         descripcion.strip(),
@@ -2796,7 +2811,8 @@ def crear_evento(
         hora_inicio,
         hora_fin,
         recurrente_id,
-        fecha_ocurrencia
+        fecha_ocurrencia,
+        external_uid
     ))
 
     evento_id = cursor.lastrowid
@@ -2805,6 +2821,145 @@ def crear_evento(
     conexion.close()
 
     return evento_id
+
+
+def obtener_evento_por_external_uid(
+    external_uid
+):
+    if not external_uid:
+        return None
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            titulo,
+            descripcion,
+            fecha,
+            hora_inicio,
+            hora_fin,
+            estado
+        FROM eventos
+        WHERE external_uid = ?
+        LIMIT 1
+    """, (
+        str(external_uid).strip(),
+    ))
+
+    resultado = cursor.fetchone()
+
+    conexion.close()
+
+    return resultado
+
+
+def asignar_external_uid_evento(
+    evento_id,
+    external_uid
+):
+    if not external_uid:
+        return False
+
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    try:
+        cursor.execute("""
+            UPDATE eventos
+            SET external_uid = ?,
+                fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (
+            str(external_uid).strip(),
+            int(evento_id),
+        ))
+
+        conexion.commit()
+        actualizado = cursor.rowcount > 0
+
+    except sqlite3.IntegrityError:
+        conexion.rollback()
+        actualizado = False
+
+    conexion.close()
+
+    return actualizado
+
+
+def auditar_integracion_calendario_db():
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    columnas = {
+        fila[1]
+        for fila in cursor.execute(
+            "PRAGMA table_info(eventos)"
+        ).fetchall()
+    }
+
+    indices = {
+        fila[1]: fila
+        for fila in cursor.execute(
+            "PRAGMA index_list(eventos)"
+        ).fetchall()
+    }
+
+    problemas = []
+
+    if "external_uid" not in columnas:
+        problemas.append(
+            "falta la columna external_uid"
+        )
+
+    indice = indices.get(
+        "idx_eventos_external_uid"
+    )
+
+    if indice is None:
+        problemas.append(
+            "falta el índice único de external_uid"
+        )
+    elif not bool(
+        indice[2]
+    ):
+        problemas.append(
+            "el índice de external_uid no es único"
+        )
+
+    duplicados_uid = cursor.execute("""
+        SELECT
+            external_uid,
+            COUNT(*)
+        FROM eventos
+        WHERE external_uid IS NOT NULL
+          AND TRIM(external_uid) <> ''
+        GROUP BY external_uid
+        HAVING COUNT(*) > 1
+    """).fetchall()
+
+    if duplicados_uid:
+        problemas.append(
+            "hay UID externos duplicados"
+        )
+
+    total_uid = cursor.execute("""
+        SELECT COUNT(*)
+        FROM eventos
+        WHERE external_uid IS NOT NULL
+          AND TRIM(external_uid) <> ''
+    """).fetchone()[0]
+
+    conexion.close()
+
+    return {
+        "correcto": not problemas,
+        "problemas": problemas,
+        "eventos_con_uid": int(
+            total_uid
+        ),
+    }
 
 
 def obtener_eventos_activos():
@@ -3026,6 +3181,44 @@ def modificar_evento(
         "actualizado",
         evento_id
     )
+
+
+def actualizar_evento_desde_calendario(
+    evento_id,
+    titulo,
+    descripcion,
+    fecha,
+    hora_inicio,
+    hora_fin
+):
+    conexion = conectar()
+    cursor = conexion.cursor()
+
+    cursor.execute("""
+        UPDATE eventos
+        SET
+            titulo = ?,
+            descripcion = ?,
+            fecha = ?,
+            hora_inicio = ?,
+            hora_fin = ?,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND estado = 'activo'
+    """, (
+        str(titulo or "").strip(),
+        str(descripcion or "").strip(),
+        fecha,
+        hora_inicio,
+        hora_fin,
+        int(evento_id),
+    ))
+
+    conexion.commit()
+    actualizado = cursor.rowcount > 0
+    conexion.close()
+
+    return actualizado
 
 
 def cancelar_evento(
