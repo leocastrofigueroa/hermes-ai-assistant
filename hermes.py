@@ -14,6 +14,10 @@ import requests
 
 from memoria import (
     crear_base,
+    crear_automatizacion,
+    gestionar_automatizacion,
+    obtener_automatizaciones,
+    obtener_automatizacion_por_id,
     guardar_recuerdo,
     obtener_recuerdos,
     buscar_recuerdos,
@@ -76,6 +80,7 @@ from memoria import (
 
 from recordatorios import (
     crear_tabla_recordatorios,
+    mostrar_auditoria_automatizaciones,
     crear_recordatorio,
     obtener_recordatorios_pendientes,
     obtener_recordatorio_por_id,
@@ -14937,6 +14942,151 @@ def generar_resumen_diario():
     )
 
 
+AYUDA_AUTOMATIZACIONES = (
+    'Podés decir: Creá una automatización llamada "Resumen" todos los días '
+    'a las 08:00: Mostrame el resumen diario. '
+    'Para una semanal: Creá una automatización llamada "Plan semanal" '
+    'cada lunes a las 09:00: Mostrame las tareas pendientes. '
+    'También: Listá las automatizaciones, Ver automatización 1, Pausá la automatización 1, '
+    'Reanudá la automatización 1 o Eliminá la automatización 1. '
+    'Edición: Cambiá la hora de la automatización 1 a las 09:30. '
+    'El motor ejecuta solo consultas locales permitidas (28.2).'
+)
+
+
+def gestionar_automatizacion_desde_mensaje(mensaje):
+    texto = normalizar_texto(mensaje)
+    estado = re.fullmatch(r'(pausa|pausar|reanuda|reanudar|elimina|eliminar|borra|borrar) (?:la )?automatizacion #?([0-9]+)[.!]?', texto)
+    edicion = re.fullmatch(
+        r'(?:cambiá|cambia|cambiar|modificá|modifica|modificar) (?:la|el) '
+        r'(hora|nombre|instrucci[oó]n|frecuencia|d[ií]a(?: semanal)?) de (?:la )?'
+        r'automatizaci[oó]n #?([0-9]+) a(?: las)?\s*:?\s*(.*)',
+        mensaje.strip(), re.IGNORECASE | re.DOTALL)
+    if not estado and not edicion:
+        return None
+    try:
+        if estado:
+            verbo, identificador = estado.groups()
+            accion = {'pausa': 'pausar', 'pausar': 'pausar', 'reanuda': 'reanudar',
+                      'reanudar': 'reanudar', 'elimina': 'eliminar', 'eliminar': 'eliminar',
+                      'borra': 'eliminar', 'borrar': 'eliminar'}[verbo]
+            cambios = {}
+        else:
+            campo, identificador, valor = edicion.groups()
+            campo = normalizar_texto(campo)
+            valor = valor.strip()
+            accion = 'editar'
+            if campo in ('nombre', 'instruccion'):
+                if campo == 'nombre':
+                    if len(valor) < 2 or not (valor.startswith('"') and valor.endswith('"')):
+                        raise ValueError('Escribí el nombre entre comillas dobles.')
+                    valor = valor[1:-1]
+                cambios = {campo: valor}
+            elif campo == 'hora':
+                cambios = {'hora': valor.zfill(5)}
+            elif campo.startswith('dia'):
+                cambios = {'dia_semana': normalizar_texto(valor)}
+            else:
+                valor = normalizar_texto(valor)
+                semanal = re.fullmatch(r'semanal(?: (?:los|cada))? (lunes|martes|miercoles|jueves|viernes|sabado|domingo)', valor)
+                cambios = {'frecuencia': 'semanal', 'dia_semana': semanal.group(1)} if semanal else {'frecuencia': valor}
+        identificador = identificador.lstrip('0') or '0'
+        if len(identificador) > 19:
+            raise ValueError('No encontré esa automatización.')
+        gestionar_automatizacion(identificador, accion, **cambios)
+        etiqueta = {'pausar': 'pausada', 'reanudar': 'activa', 'eliminar': 'eliminada', 'editar': 'actualizada'}[accion]
+        return f'Automatización #{identificador} {etiqueta}.'
+    except ValueError as error:
+        return str(error)
+
+
+def procesar_comando_automatizaciones(mensaje):
+    # Reservar órdenes explícitas antes de otros detectores evita que una
+    # instrucción almacenada se interprete como una acción inmediata.
+    texto = normalizar_texto(mensaje).lstrip("¿¡")
+    if re.fullmatch(r'(?:audita|auditar|revisa|revisar) (?:las )?automatizaciones[.!?]*', texto):
+        return mostrar_auditoria_automatizaciones()
+    gestion = gestionar_automatizacion_desde_mensaje(mensaje)
+    if gestion is not None:
+        return gestion
+    prefijo = r'(?:crea|crear|programa|programar|agenda|agendar) (?:una )?automatizacion\b'
+    consulta = r'(?:(?:ver|mostrar|mostra|mostrame|muestrame) (?:el estado de )?|estado de )(?:la )?automatizacion(?: (?:con )?id)? #?([0-9]+)'
+    listado = r'(?:(?:listar|lista|mostrar|mostra|mostrame|muestrame) (?:las |mis )?automatizaciones|(?:mis |las )?automatizaciones|que automatizaciones tengo)'
+    if re.fullmatch(listado + r'[?.!]*', texto):
+        filas = obtener_automatizaciones()
+        if not filas:
+            return 'No tenés automatizaciones guardadas. ' + AYUDA_AUTOMATIZACIONES
+        lineas = ['Automatizaciones guardadas (requieren el motor de recordatorios):']
+        for fila in filas:
+            dia = f" / {fila['dia_semana']}" if fila['dia_semana'] else ''
+            lineas.append(f"#{fila['id']} — {fila['nombre']} — {fila['frecuencia']}{dia} "
+                          f"a las {fila['hora']} — {fila['estado']}")
+        return '\n'.join(lineas)
+    match = re.fullmatch(consulta + r'[?.!]*', texto)
+    if match:
+        # No convertir IDs arbitrariamente largos a int.
+        identificador = match.group(1).lstrip('0') or '0'
+        fila = obtener_automatizacion_por_id(identificador) if len(identificador) <= 19 else None
+        if fila is None:
+            return f'No encontré la automatización {match.group(1)}.'
+        return '\n'.join([
+            f"Automatización #{fila['id']}: {fila['nombre']}",
+            f"Instrucción: {fila['instruccion']}",
+            f"Frecuencia: {fila['frecuencia']}",
+            f"Día: {fila['dia_semana'] or 'todos los días'}",
+            f"Hora local: {fila['hora']}",
+            f"Estado: {'eliminada' if fila['fecha_eliminacion'] else fila['estado']}",
+            f"Eliminación: {fila['fecha_eliminacion'] or 'no'}",
+            f"Versión de programación: {fila['version_programacion']}",
+            f"Último disparo: {fila['ultimo_disparo'] or 'nunca'}",
+            f"Creación: {fila['fecha_creacion']}",
+            f"Actualización: {fila['fecha_actualizacion']}",
+            'Ejecución: consultas locales permitidas con el motor de recordatorios (28.2).',
+        ])
+    if re.match(prefijo, texto):
+        # Delimitadores explícitos: no inferir horarios desde la instrucción.
+        match = re.fullmatch(
+            r'(?:creá|crea|crear|programá|programa|programar|agendá|agenda|agendar) '
+            r'(?:una )?automatizaci[oó]n (?:llamada )?"([^"\n]+)" '
+            r'(.+?) a las (\d{1,2}:\d{2})\s*:\s*(.+)',
+            mensaje.strip(), re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return 'Faltan datos o el formato es inválido. ' + AYUDA_AUTOMATIZACIONES
+        nombre, recurrencia, hora, instruccion = match.groups()
+        recurrencia = normalizar_texto(recurrencia)
+        dia = None
+        if recurrencia in ('diaria', 'diariamente', 'todos los dias', 'cada dia'):
+            frecuencia = 'diaria'
+        else:
+            semanal = re.fullmatch(
+                r'(?:cada|todos los|semanal(?: los)?) '
+                r'(lunes|martes|miercoles|jueves|viernes|sabado|domingo)', recurrencia
+            )
+            if not semanal:
+                return 'Usá una frecuencia diaria o un único día semanal. ' + AYUDA_AUTOMATIZACIONES
+            frecuencia, dia = 'semanal', semanal.group(1)
+        try:
+            identificador = crear_automatizacion(
+                nombre, instruccion, frecuencia, hora.zfill(5), dia
+            )
+        except ValueError as error:
+            return str(error) + ' ' + AYUDA_AUTOMATIZACIONES
+        return (f'Automatización #{identificador} guardada: {nombre.strip()}. '
+                'Estado: activa. El motor ejecutará la consulta si está permitida en 28.2; '
+                'la instrucción queda almacenada como texto.')
+    if re.match(r'(?:cambia|cambiar|modifica|modificar) .*\bautomatizacion\b', texto):
+        return 'Formato de edición inválido. Ejemplo: Cambiá la hora de la automatización 3 a las 09:30.'
+    if re.match(
+        r'(?:(?:ver|mostrar|mostra|mostrame|muestrame|listar|lista|pausa|pausar|'
+        r'reanuda|reanudar|edita|editar|modifica|modificar|elimina|eliminar|'
+        r'borra|borrar|audita|auditar|ejecuta|ejecutar) '
+        r'(?:(?:la|las|una|mis) )?automatizacion(?:es)?\b|automatizacion(?:es)?\b)', texto
+    ):
+        return 'Gestión disponible: pausar, reanudar, editar y eliminar (28.3). Usá Auditá las automatizaciones para la auditoría. Ejecuciones manuales no disponibles. ' + AYUDA_AUTOMATIZACIONES
+    return None
+
+
 def procesar_comandos_directos(
     mensaje
 ):
@@ -14946,6 +15096,12 @@ def procesar_comandos_directos(
     texto = normalizar_texto(
         mensaje
     )
+
+    automatizacion = procesar_comando_automatizaciones(mensaje)
+    if automatizacion is not None:
+        confirmacion_pendiente = None
+        ultimo_contexto_edicion = None
+        return automatizacion
 
     if es_auditoria_acceso_web(
         mensaje
@@ -16447,6 +16603,7 @@ print("🧠 Memoria permanente: activa")
 print("✅ Gestión de tareas: activa")
 print("🗓️ Agenda y eventos: activos")
 print("🔔 Recordatorios: activos")
+print("⚙️ Automatizaciones: consultas locales seguras mediante el motor (28.2)")
 print("⏰ Avisos previos a eventos: activos")
 print("🔗 Vínculo evento-recordatorio: activo")
 print("🔔 Múltiples avisos por evento: activos")

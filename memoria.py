@@ -157,6 +157,8 @@ def crear_base():
             ADD COLUMN prioridad TEXT NOT NULL DEFAULT 'media'
         """)
 
+    crear_tablas_automatizaciones(conexion)
+
     # ------------------------------------------------------
     # RUTINAS RECURRENTES
     # ------------------------------------------------------
@@ -3260,6 +3262,168 @@ def cancelar_evento(
         "cancelado",
         evento_id
     )
+
+
+
+
+# ==========================================================
+# CONFIGURACIÓN DE AUTOMATIZACIONES
+# ==========================================================
+
+def validar_configuracion_automatizacion(nombre, instruccion, frecuencia, hora, dia_semana=None):
+    if not isinstance(nombre, str) or not nombre.strip():
+        raise ValueError("El nombre es obligatorio.")
+    if not isinstance(instruccion, str) or not instruccion.strip():
+        raise ValueError("La instrucción es obligatoria.")
+    if frecuencia not in ('diaria', 'semanal'):
+        raise ValueError("La frecuencia debe ser diaria o semanal.")
+    if not isinstance(hora, str) or len(hora) != 5:
+        raise ValueError("La hora debe tener formato HH:MM (00:00 a 23:59).")
+    try:
+        valida = datetime.strptime(hora, '%H:%M').strftime('%H:%M') == hora
+    except ValueError:
+        valida = False
+    if not valida:
+        raise ValueError("La hora debe tener formato HH:MM (00:00 a 23:59).")
+    dias = ('lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo')
+    if isinstance(dia_semana, str):
+        dia_semana = ''.join(c for c in unicodedata.normalize('NFD', dia_semana.lower().strip())
+                             if unicodedata.category(c) != 'Mn')
+    if frecuencia == 'diaria' and dia_semana is not None:
+        raise ValueError("Una automatización diaria no lleva día de semana.")
+    if frecuencia == 'semanal' and dia_semana not in dias:
+        raise ValueError("La automatización semanal requiere un día de semana válido.")
+    return nombre.strip(), instruccion.strip(), frecuencia, hora, dia_semana
+
+
+def crear_automatizacion(nombre, instruccion, frecuencia, hora, dia_semana=None):
+    """Guarda configuración validada. La instrucción nunca se ejecuta aquí."""
+    nombre, instruccion, frecuencia, hora, dia_semana = validar_configuracion_automatizacion(
+        nombre, instruccion, frecuencia, hora, dia_semana
+    )
+    conexion = conectar()
+    try:
+        with conexion:
+            cursor = conexion.execute("""
+                INSERT INTO automatizaciones (nombre, instruccion, frecuencia, dia_semana, hora)
+                VALUES (?, ?, ?, ?, ?)
+            """, (nombre.strip(), instruccion.strip(), frecuencia, dia_semana, hora))
+            return cursor.lastrowid
+    finally:
+        conexion.close()
+
+
+def obtener_automatizaciones():
+    conexion = conectar()
+    try:
+        conexion.row_factory = sqlite3.Row
+        return [dict(fila) for fila in conexion.execute(
+            "SELECT * FROM automatizaciones WHERE fecha_eliminacion IS NULL ORDER BY id"
+        ).fetchall()]
+    finally:
+        conexion.close()
+
+
+def obtener_automatizacion_por_id(automatizacion_id):
+    conexion = conectar()
+    try:
+        conexion.row_factory = sqlite3.Row
+        fila = conexion.execute(
+            "SELECT * FROM automatizaciones WHERE id = ?", (automatizacion_id,)
+        ).fetchone()
+        return dict(fila) if fila is not None else None
+    finally:
+        conexion.close()
+
+
+def crear_tablas_automatizaciones(conexion):
+    """Esquema compartido por la consola y el motor; no confirma la transacción."""
+    cursor = conexion.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automatizaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL CHECK (length(trim(nombre)) > 0),
+            instruccion TEXT NOT NULL CHECK (length(trim(instruccion)) > 0),
+            frecuencia TEXT NOT NULL CHECK (frecuencia IN ('diaria', 'semanal')),
+            dia_semana TEXT,
+            hora TEXT NOT NULL CHECK (
+                hora GLOB '[0-2][0-9]:[0-5][0-9]' AND hora < '24:00'
+            ),
+            estado TEXT NOT NULL DEFAULT 'activa'
+                CHECK (estado IN ('activa', 'pausada')),
+            ultimo_disparo TEXT,
+            fecha_creacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (
+                (frecuencia = 'diaria' AND dia_semana IS NULL) OR
+                (frecuencia = 'semanal' AND dia_semana IS NOT NULL AND
+                 dia_semana IN ('lunes', 'martes', 'miercoles', 'jueves',
+                                'viernes', 'sabado', 'domingo'))
+            )
+        )
+    """)
+
+    columnas = {fila[1] for fila in cursor.execute('PRAGMA table_info(automatizaciones)')}
+    if 'fecha_eliminacion' not in columnas:
+        cursor.execute('ALTER TABLE automatizaciones ADD COLUMN fecha_eliminacion TEXT')
+    if 'version_programacion' not in columnas:
+        cursor.execute('ALTER TABLE automatizaciones ADD COLUMN version_programacion INTEGER NOT NULL DEFAULT 0')
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ejecuciones_automatizaciones (
+            automatizacion_id INTEGER NOT NULL,
+            ventana TEXT NOT NULL,
+            estado TEXT NOT NULL CHECK (estado IN ('en_curso', 'correcta', 'error')),
+            inicio TEXT NOT NULL,
+            fin TEXT,
+            resultado TEXT,
+            error TEXT,
+            PRIMARY KEY (automatizacion_id, ventana)
+        )
+    """)
+
+
+def gestionar_automatizacion(identificador, accion='editar', **cambios):
+    """Mutación atómica; el borrado lógico conserva configuración e historial."""
+    if accion not in ('editar', 'pausar', 'reanudar', 'eliminar'):
+        raise ValueError('Acción de automatización inválida.')
+    permitidos = {'nombre', 'instruccion', 'frecuencia', 'dia_semana', 'hora'}
+    if set(cambios) - permitidos or (accion != 'editar' and cambios):
+        raise ValueError('Campos de automatización inválidos.')
+    conexion = conectar()
+    try:
+        with conexion:
+            conexion.row_factory = sqlite3.Row
+            conexion.execute('BEGIN IMMEDIATE')
+            fila = conexion.execute('SELECT * FROM automatizaciones WHERE id = ?', (identificador,)).fetchone()
+            if fila is None:
+                raise ValueError('No encontré esa automatización.')
+            if fila['fecha_eliminacion'] is not None:
+                raise ValueError('La automatización está eliminada; no se puede modificar ni reanudar.')
+            if accion == 'eliminar':
+                conexion.execute("""UPDATE automatizaciones SET estado='pausada',
+                    fecha_eliminacion=CURRENT_TIMESTAMP, fecha_actualizacion=CURRENT_TIMESTAMP WHERE id=?""", (identificador,))
+            elif accion in ('pausar', 'reanudar'):
+                conexion.execute("""UPDATE automatizaciones SET estado=?,
+                    fecha_actualizacion=CURRENT_TIMESTAMP WHERE id=?""",
+                    ('pausada' if accion == 'pausar' else 'activa', identificador))
+            else:
+                nueva = dict(fila)
+                nueva.update(cambios)
+                if cambios.get('frecuencia') == 'diaria' and 'dia_semana' not in cambios:
+                    nueva['dia_semana'] = None
+                valores = validar_configuracion_automatizacion(
+                    nueva['nombre'], nueva['instruccion'], nueva['frecuencia'], nueva['hora'], nueva['dia_semana'])
+                nombre, instruccion, frecuencia, hora, dia = valores
+                reprogramada = (frecuencia, hora, dia) != (fila['frecuencia'], fila['hora'], fila['dia_semana'])
+                conexion.execute("""UPDATE automatizaciones SET nombre=?, instruccion=?,
+                    frecuencia=?, hora=?, dia_semana=?, version_programacion=?,
+                    ultimo_disparo=?, fecha_actualizacion=CURRENT_TIMESTAMP WHERE id=?""",
+                    (nombre, instruccion, frecuencia, hora, dia,
+                     fila['version_programacion'] + int(reprogramada),
+                     None if reprogramada else fila['ultimo_disparo'], identificador))
+    finally:
+        conexion.close()
 
 
 if __name__ == "__main__":

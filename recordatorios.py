@@ -1,3 +1,11 @@
+import logging
+import re
+import unicodedata
+from contextlib import closing
+from pathlib import Path
+
+from memoria import crear_tablas_automatizaciones, validar_configuracion_automatizacion
+
 import sqlite3
 import subprocess
 import sys
@@ -187,6 +195,8 @@ def crear_tabla_recordatorios():
         WHERE recurrente_id IS NOT NULL
           AND fecha_ocurrencia IS NOT NULL
     """)
+
+    crear_tablas_automatizaciones(conexion)
 
     conexion.commit()
     conexion.close()
@@ -2882,9 +2892,371 @@ def revisar_recordatorios():
             )
 
 
+# ==========================================================
+# AUTOMATIZACIONES: SOLO CONSULTAS LOCALES (28.2)
+# ==========================================================
+
+LOGGER_AUTOMATIZACIONES = logging.getLogger('hermes.automatizaciones')
+
+
+def clasificar_instruccion_automatizacion(instruccion):
+    """Valida sin ejecutar: fuente única de la lista segura para motor y auditoría."""
+    if not isinstance(instruccion, str):
+        raise ValueError("Instrucción no permitida: debe ser texto.")
+    texto = ''.join(c for c in unicodedata.normalize('NFD', instruccion.lower())
+                    if unicodedata.category(c) != 'Mn')
+    texto = ' '.join(texto.strip().rstrip('.!?').split())
+    match = re.fullmatch(
+        r'(?:mostrar|mostra|mostrame|muestrame|consultar|consulta|ver) '
+        r'(?:(?:el|las|los|mis) )?'
+        r'(resumen diario|tareas pendientes|eventos de hoy|eventos|notas)', texto
+    )
+    if not match:
+        raise ValueError('Instrucción no permitida en 28.2; solo consultas locales explícitas.')
+    return match.group(1)
+
+
+def resolver_instruccion_automatizacion(instruccion):
+    capacidad = clasificar_instruccion_automatizacion(instruccion)
+    if capacidad == 'resumen diario':
+        return generar_resumen_diario_motor()
+    consultas = {
+        'tareas pendientes': "SELECT id, titulo, fecha, prioridad FROM tareas WHERE estado = 'pendiente' ORDER BY id",
+        'eventos': "SELECT id, titulo, fecha, hora_inicio, hora_fin FROM eventos WHERE estado = 'activo' ORDER BY fecha, hora_inicio, id",
+        'notas': "SELECT id, titulo, contenido FROM notas WHERE estado = 'activa' ORDER BY id",
+    }
+    with closing(conectar()) as conexion:
+        if capacidad == 'eventos de hoy':
+            filas = conexion.execute(
+                consultas['eventos'].replace('ORDER BY', 'AND fecha = ? ORDER BY'),
+                (datetime.now().date().isoformat(),)
+            ).fetchall()
+        else:
+            filas = conexion.execute(consultas[capacidad]).fetchall()
+    return capacidad.capitalize() + ':\n' + (
+        '\n'.join(' | '.join(str(valor) if valor is not None else '-' for valor in fila)
+                  for fila in filas) if filas else 'Sin resultados.'
+    )
+
+
+def ventana_automatizacion(fila, ahora):
+    if fila['estado'] != 'activa' or fila['fecha_eliminacion'] is not None:
+        return None
+    hora = fila['hora']
+    if not isinstance(hora, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', hora):
+        raise ValueError('Horario inválido')
+    if type(fila['version_programacion']) is not int or fila['version_programacion'] < 0:
+        raise ValueError('Versión de programación inválida')
+    frecuencia = fila['frecuencia']
+    if frecuencia not in ('diaria', 'semanal'):
+        raise ValueError('Frecuencia inválida')
+    if frecuencia == 'semanal' and fila['dia_semana'] not in DIAS_SEMANA_RUTINA.values():
+        raise ValueError('Día de semana inválido')
+    if frecuencia == 'diaria' and fila['dia_semana'] is not None:
+        raise ValueError('Una automatización diaria no lleva día de semana')
+    # Revisar también ayer para cubrir la gracia de horarios cercanos a medianoche.
+    for fecha in (ahora, ahora - timedelta(days=1)):
+        objetivo = fecha.replace(hour=int(hora[:2]), minute=int(hora[3:]), second=0, microsecond=0)
+        if not 0 <= (ahora - objetivo).total_seconds() <= 300:
+            continue
+        if frecuencia == 'semanal' and fila['dia_semana'] != DIAS_SEMANA_RUTINA[objetivo.weekday()]:
+            continue
+        clave = f"{frecuencia}:{objetivo.date().isoformat()}"
+        if fila['version_programacion']:
+            clave += f":v{fila['version_programacion']}"
+        return clave if fila['ultimo_disparo'] != clave else None
+    return None
+
+
+def reclamar_automatizacion(identificador, ahora):
+    # La selección, comprobación del estado y reserva ocurren bajo el mismo
+    # bloqueo. La PK persiste incluso tras errores, reinicios o dos motores.
+    with closing(conectar()) as conexion, conexion:
+        conexion.row_factory = sqlite3.Row
+        conexion.execute('BEGIN IMMEDIATE')
+        if not proteccion_duplicados_automatizaciones(conexion):
+            raise ValueError('Protección contra doble disparo ausente; ejecución bloqueada.')
+        fila = conexion.execute('SELECT * FROM automatizaciones WHERE id = ?', (identificador,)).fetchone()
+        if fila is None:
+            return None
+        ventana = ventana_automatizacion(fila, ahora)
+        if ventana is None:
+            return None
+        cursor = conexion.execute("""
+            INSERT OR IGNORE INTO ejecuciones_automatizaciones
+                (automatizacion_id, ventana, estado, inicio)
+            VALUES (?, ?, 'en_curso', ?)
+        """, (identificador, ventana, ahora.isoformat(timespec='seconds')))
+        return (dict(fila), ventana) if cursor.rowcount == 1 else None
+
+
+def finalizar_automatizacion(identificador, ventana, resultado=None, error=None, conexion=None):
+    if error is None and not isinstance(resultado, str):
+        raise ValueError('Una ejecución correcta requiere resultado de texto.')
+    if error is not None and (not isinstance(error, str) or not error.strip() or resultado is not None):
+        raise ValueError('Una ejecución fallida requiere error no vacío y ningún resultado.')
+    if conexion is None:
+        with closing(conectar()) as propia, propia:
+            return finalizar_automatizacion(identificador, ventana, resultado, error, propia)
+    cursor = conexion.execute("""
+        UPDATE ejecuciones_automatizaciones
+        SET estado = ?, fin = ?, resultado = ?, error = ?
+        WHERE automatizacion_id = ? AND ventana = ? AND estado = 'en_curso'
+    """, ('error' if error is not None else 'correcta',
+          datetime.now().isoformat(timespec='seconds'), resultado, error, identificador, ventana))
+    if error is None and cursor.rowcount:
+        conexion.execute("""
+            UPDATE automatizaciones SET ultimo_disparo = ?,
+                fecha_actualizacion = CURRENT_TIMESTAMP WHERE id = ?
+                AND estado = 'activa' AND fecha_eliminacion IS NULL
+                AND ((version_programacion = 0 AND ? NOT LIKE '%:v%')
+                     OR ? LIKE '%:v' || version_programacion)
+        """, (ventana, identificador, ventana, ventana))
+
+
+def ejecutar_reserva_automatizacion(fila, ventana):
+    # Serializa la consulta local y su finalización con pausa/edición/borrado.
+    # Si la gestión gana el bloqueo, la reserva obsoleta no se ejecuta.
+    with closing(conectar()) as conexion, conexion:
+        conexion.row_factory = sqlite3.Row
+        conexion.execute('BEGIN IMMEDIATE')
+        if not proteccion_duplicados_automatizaciones(conexion):
+            raise ValueError('Protección contra doble disparo ausente; ejecución bloqueada.')
+        actual = conexion.execute('SELECT * FROM automatizaciones WHERE id=?', (fila['id'],)).fetchone()
+        campos = ('nombre', 'instruccion', 'frecuencia', 'dia_semana', 'hora', 'version_programacion')
+        if (actual is None or actual['estado'] != 'activa' or actual['fecha_eliminacion'] is not None
+                or any(actual[campo] != fila[campo] for campo in campos)):
+            finalizar_automatizacion(fila['id'], ventana, error='Reserva cancelada por cambio de configuración o estado.', conexion=conexion)
+            return None
+        ejecucion = conexion.execute("""SELECT estado FROM ejecuciones_automatizaciones
+            WHERE automatizacion_id=? AND ventana=?""", (fila['id'], ventana)).fetchone()
+        if ejecucion is None or ejecucion['estado'] != 'en_curso':
+            return None
+        resultado = resolver_instruccion_automatizacion(actual['instruccion'])
+        finalizar_automatizacion(fila['id'], ventana, resultado=resultado, conexion=conexion)
+        return resultado
+
+
+def revisar_automatizaciones(ahora=None):
+    ahora = ahora or datetime.now()
+    try:
+        with closing(conectar()) as conexion:
+            ids = conexion.execute("SELECT id FROM automatizaciones WHERE estado = 'activa' AND fecha_eliminacion IS NULL ORDER BY id").fetchall()
+    except Exception:
+        LOGGER_AUTOMATIZACIONES.exception('No se pudieron consultar las automatizaciones')
+        return
+    for (identificador,) in ids:
+        reserva = None
+        try:
+            reserva = reclamar_automatizacion(identificador, ahora)
+            if reserva is None:
+                continue
+            fila, ventana = reserva
+            resultado = ejecutar_reserva_automatizacion(fila, ventana)
+            if resultado is None:
+                continue
+        except Exception as error:
+            LOGGER_AUTOMATIZACIONES.exception('Error en automatización #%s', identificador)
+            if reserva is not None:
+                try:
+                    finalizar_automatizacion(identificador, reserva[1], error=str(error) or type(error).__name__)
+                except Exception:
+                    LOGGER_AUTOMATIZACIONES.exception('No se pudo registrar el error de #%s', identificador)
+            continue
+        # La salida es informativa: el resultado ya quedó persistido en SQLite.
+        try:
+            print(f"⚙️ Automatización #{identificador}: {fila['nombre']}\n{resultado}", flush=True)
+        except Exception:
+            LOGGER_AUTOMATIZACIONES.exception('No se pudo mostrar el resultado de #%s', identificador)
+
+
+def proteccion_duplicados_automatizaciones(conexion):
+    columnas = conexion.execute('PRAGMA table_info(ejecuciones_automatizaciones)').fetchall()
+    clave = [fila[1] for fila in sorted(columnas, key=lambda fila: fila[5]) if fila[5]]
+    requeridas = {fila[1]: fila for fila in columnas}
+    return (clave == ['automatizacion_id', 'ventana']
+            and all(requeridas[nombre][3] for nombre in clave))
+
+
+def auditar_automatizaciones(ahora=None):
+    """Inspección de solo lectura: nunca ejecuta instrucciones ni repara datos."""
+    ahora = ahora or datetime.now()
+    informe = {'errores': [], 'advertencias': [], 'automatizaciones': 0,
+               'ejecuciones': 0, 'errores_registrados': 0, 'antiduplicados': False}
+    errores, avisos = informe['errores'], informe['advertencias']
+    try:
+        # mode=ro evita crear una base vacía si la ruta es incorrecta.
+        uri = Path(DB_PATH).resolve().as_uri() + '?mode=ro'
+        with closing(sqlite3.connect(uri, uri=True)) as conexion:
+            conexion.row_factory = sqlite3.Row
+            conexion.execute('PRAGMA query_only=ON')
+            conexion.execute('BEGIN')  # Una sola instantánea, incluso con el motor activo.
+            with closing(sqlite3.connect(':memory:')) as referencia:
+                crear_tablas_automatizaciones(referencia)
+                for tabla in ('automatizaciones', 'ejecuciones_automatizaciones'):
+                    esperado = {fila[1]: fila for fila in referencia.execute(f'PRAGMA table_info({tabla})')}
+                    actual = {fila[1]: fila for fila in conexion.execute(f'PRAGMA table_info({tabla})')}
+                    for nombre, columna in esperado.items():
+                        if nombre not in actual:
+                            errores.append(f'Esquema: falta {tabla}.{nombre}.')
+                        elif tuple(actual[nombre][2:6]) != tuple(columna[2:6]):
+                            errores.append(f'Esquema: tipo, nulabilidad, valor por defecto o clave inválidos en {tabla}.{nombre}.')
+                    # Comprobar también los CHECK existentes, sin probar INSERT en la base real.
+                    sql = conexion.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tabla,)).fetchone()
+                    sql_ref = referencia.execute("SELECT sql FROM sqlite_master WHERE name=?", (tabla,)).fetchone()[0]
+                    if sql is not None:
+                        for restriccion in restricciones_check_automatizaciones(sql_ref):
+                            if restriccion not in restricciones_check_automatizaciones(sql[0]):
+                                errores.append(f'Esquema: falta una restricción CHECK en {tabla}.')
+            informe['antiduplicados'] = proteccion_duplicados_automatizaciones(conexion)
+            if not informe['antiduplicados']:
+                errores.append('Protección contra doble disparo ausente: se requiere PK (automatizacion_id, ventana) no nula.')
+            if errores:
+                return informe  # No consultar columnas que podrían faltar.
+            filas = [dict(fila) for fila in conexion.execute('SELECT * FROM automatizaciones ORDER BY id')]
+            ejecuciones = [dict(fila) for fila in conexion.execute('SELECT * FROM ejecuciones_automatizaciones ORDER BY automatizacion_id, ventana')]
+            informe['automatizaciones'], informe['ejecuciones'] = len(filas), len(ejecuciones)
+            por_id = {fila['id']: fila for fila in filas}
+            por_clave = {(fila['automatizacion_id'], fila['ventana']): fila for fila in ejecuciones}
+            configuraciones = {}
+            for fila in filas:
+                etiqueta = f"Automatización #{fila['id']}"
+                if fila['estado'] not in ('activa', 'pausada'):
+                    errores.append(f'{etiqueta}: estado inválido.')
+                if fila['fecha_eliminacion'] is not None and fila['estado'] != 'pausada':
+                    errores.append(f'{etiqueta}: eliminada sin estado interno pausada (el motor igualmente la bloquea).')
+                if type(fila['version_programacion']) is not int or fila['version_programacion'] < 0:
+                    errores.append(f'{etiqueta}: versión de programación inválida.')
+                # Validar horarios incluso para pausadas/eliminadas, sin invocar consultas.
+                try:
+                    validar_configuracion_automatizacion(
+                        fila['nombre'], fila['instruccion'], fila['frecuencia'], fila['hora'], fila['dia_semana'])
+                    if fila['dia_semana'] not in (None, *DIAS_SEMANA_RUTINA.values()):
+                        raise ValueError('Día semanal no canónico.')
+                except (ValueError, TypeError):
+                    errores.append(f'{etiqueta}: nombre, instrucción, frecuencia, día u hora inválidos.')
+                try:
+                    capacidad = clasificar_instruccion_automatizacion(fila['instruccion'])
+                except ValueError:
+                    capacidad = None
+                    avisos.append(f'{etiqueta}: instrucción no permitida; será rechazada sin ejecutar acciones.')
+                for campo in ('fecha_creacion', 'fecha_actualizacion', 'fecha_eliminacion'):
+                    if campo == 'fecha_eliminacion' and fila[campo] is None:
+                        continue
+                    if fecha_auditoria_automatizaciones(fila[campo]) is None:
+                        errores.append(f'{etiqueta}: {campo} inválida.')
+                if fila['estado'] == 'activa' and fila['fecha_eliminacion'] is None and capacidad:
+                    clave = (capacidad, fila['frecuencia'], fila['dia_semana'], fila['hora'])
+                    if clave in configuraciones:
+                        avisos.append(f"{etiqueta}: misma consulta y horario que #{configuraciones[clave]}; IDs distintos pueden ejecutar ambas.")
+                    else:
+                        configuraciones[clave] = fila['id']
+                ultimo = fila['ultimo_disparo']
+                if ultimo is not None:
+                    registro = por_clave.get((fila['id'], ultimo))
+                    ventana = analizar_ventana_automatizacion(ultimo)
+                    if (registro is None or registro['estado'] != 'correcta' or ventana is None
+                            or ventana[0] != fila['frecuencia'] or ventana[2] != fila['version_programacion']):
+                        errores.append(f'{etiqueta}: ultimo_disparo no corresponde a una ejecución correcta de su programación.')
+            for ejecucion in ejecuciones:
+                etiqueta = f"Ejecución #{ejecucion['automatizacion_id']} / {ejecucion['ventana']}"
+                padre = por_id.get(ejecucion['automatizacion_id'])
+                ventana = analizar_ventana_automatizacion(ejecucion['ventana'])
+                if padre is None:
+                    errores.append(f'{etiqueta}: automatización inexistente.')
+                if ventana is None:
+                    errores.append(f'{etiqueta}: ventana inválida.')
+                elif padre is not None and type(padre['version_programacion']) is int:
+                    if ventana[2] > padre['version_programacion']:
+                        errores.append(f'{etiqueta}: versión posterior a la configuración.')
+                    if ventana[2] == padre['version_programacion']:
+                        if (ventana[0] != padre['frecuencia'] or (ventana[0] == 'semanal'
+                                and DIAS_SEMANA_RUTINA[ventana[1].weekday()] != padre['dia_semana'])):
+                            errores.append(f'{etiqueta}: ventana incompatible con la programación vigente.')
+                        if ejecucion['estado'] == 'correcta':
+                            ultimo = analizar_ventana_automatizacion(padre['ultimo_disparo'])
+                            if ultimo is None or ultimo[1] < ventana[1]:
+                                errores.append(f'{etiqueta}: ultimo_disparo ausente o anterior a una ejecución correcta vigente.')
+                inicio = fecha_auditoria_automatizaciones(ejecucion['inicio'])
+                fin = fecha_auditoria_automatizaciones(ejecucion['fin'])
+                if inicio is None:
+                    errores.append(f'{etiqueta}: inicio inválido.')
+                estado = ejecucion['estado']
+                if estado == 'en_curso':
+                    if any(ejecucion[campo] is not None for campo in ('fin', 'resultado', 'error')):
+                        errores.append(f'{etiqueta}: reserva en_curso con datos de finalización.')
+                    if inicio is not None and (ahora - inicio).total_seconds() > 300:
+                        avisos.append(f'{etiqueta}: reserva en_curso antigua; posible interrupción, sin reintento automático.')
+                elif estado in ('correcta', 'error'):
+                    if fin is None or (inicio is not None and fin < inicio):
+                        errores.append(f'{etiqueta}: finalización inválida o anterior al inicio.')
+                    if estado == 'correcta' and (not isinstance(ejecucion['resultado'], str) or ejecucion['error'] is not None):
+                        errores.append(f'{etiqueta}: éxito sin resultado de texto o con error.')
+                    if estado == 'error':
+                        informe['errores_registrados'] += 1
+                        if not isinstance(ejecucion['error'], str) or not ejecucion['error'].strip() or ejecucion['resultado'] is not None:
+                            errores.append(f'{etiqueta}: error sin descripción o con resultado.')
+                else:
+                    errores.append(f'{etiqueta}: estado de ejecución inválido.')
+    except (sqlite3.Error, OSError, ValueError, TypeError) as error:
+        errores.append(f'No se pudo completar la auditoría: {error}')
+    return informe
+
+
+def restricciones_check_automatizaciones(sql):
+    # Los CHECK de estas tablas son expresiones simples, sin paréntesis en literales.
+    texto = ' '.join(sql.lower().split())
+    restricciones = []
+    for match in re.finditer(r'check\s*\(', texto):
+        nivel = 1
+        fin = match.end()
+        while fin < len(texto) and nivel:
+            nivel += (texto[fin] == '(') - (texto[fin] == ')')
+            fin += 1
+        restricciones.append(texto[match.start():fin])
+    return restricciones
+
+
+def fecha_auditoria_automatizaciones(valor):
+    try:
+        fecha = datetime.fromisoformat(valor)
+        return fecha if fecha.tzinfo is None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def analizar_ventana_automatizacion(valor):
+    if not isinstance(valor, str):
+        return None
+    match = re.fullmatch(r'(diaria|semanal):(\d{4}-\d{2}-\d{2})(?::v([1-9][0-9]{0,17}))?', valor)
+    if not match:
+        return None
+    try:
+        return match[1], datetime.strptime(match[2], '%Y-%m-%d').date(), int(match[3] or 0)
+    except ValueError:
+        return None
+
+
+def mostrar_auditoria_automatizaciones():
+    informe = auditar_automatizaciones()
+    lineas = ['Auditoría de automatizaciones (solo lectura).',
+              f"Configuraciones: {informe['automatizaciones']}. Ejecuciones: {informe['ejecuciones']}.",
+              f"Protección SQLite contra doble disparo: {'activa' if informe['antiduplicados'] else 'NO verificada'}.",
+              'Motor: lista segura compartida; pausadas y eliminadas bloqueadas; errores aislados por automatización.',
+              f"Ejecuciones con error registradas: {informe['errores_registrados']}.",
+              'No hay UID externo: se identifica por ID y ventana/version de programación.',
+              'Esta inspección no confirma que el proceso del motor esté encendido.']
+    lineas.extend('ERROR: ' + error for error in informe['errores'])
+    lineas.extend('AVISO: ' + aviso for aviso in informe['advertencias'])
+    if not informe['errores'] and not informe['advertencias']:
+        lineas.append('Auditoría correcta: sin inconsistencias detectadas.')
+    return '\n'.join(lineas)
+
+
 def ejecutar_motor():
     crear_tabla_recordatorios()
 
+    print("Automatizaciones: consultas locales seguras activas (28.2).")
     print()
     print(
         "════════════════════════════════"
@@ -2949,6 +3321,7 @@ def ejecutar_motor():
             revisar_resumen_nocturno()
             revisar_recordatorios()
             revisar_rutinas()
+            revisar_automatizaciones()
 
             time.sleep(
                 INTERVALO_REVISION
