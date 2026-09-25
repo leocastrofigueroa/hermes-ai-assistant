@@ -12,6 +12,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
+from voz import Voz
+
+voz = Voz()
+
 from memoria import (
     crear_base,
     crear_automatizacion,
@@ -7465,6 +7469,9 @@ def listar_ruta_local_desde_mensaje(
 
 
 ARCHIVOS_PROTEGIDOS_HERMES = {
+    "voz.py",
+    "voz_tts_worker.py",
+    "requirements-voz.txt",
     "hermes.py",
     "memoria.py",
     "recordatorios.py",
@@ -8835,6 +8842,7 @@ estas instrucciones y sin agregar información externa.
     )
 
     try:
+        voz.antes_ollama(datos)
         respuesta_http = requests.post(
             OLLAMA_URL,
             json=datos,
@@ -16242,7 +16250,7 @@ def necesita_modo_profundo(
 def elegir_modelo(
     mensaje
 ):
-    if necesita_modo_profundo(
+    if not voz.activa and necesita_modo_profundo(
         mensaje
     ):
 
@@ -16401,6 +16409,7 @@ No escribas nada fuera del JSON.
         flush=True
     )
 
+    voz.antes_ollama(datos)
     respuesta_http = requests.post(
         OLLAMA_URL,
         json=datos,
@@ -16588,6 +16597,20 @@ No escribas nada fuera del JSON.
     return respuesta
 
 
+def procesar_turno_texto(mensaje):
+    """Flujo compartido por teclado y transcripción, incluidas sus restricciones."""
+    respuesta = consultar_hermes(mensaje)
+    # El modelo puede devolver vacío o sólo un eco que el limpiador elimina.
+    # Resolverlo antes del historial y de la salida común escrita/hablada.
+    if respuesta is None or not str(respuesta).strip():
+        respuesta = 'No pude generar una respuesta útil. Volvé a intentar o reformulá la consulta.'
+    if not es_comando_mantenimiento_contexto(mensaje):
+        guardar_mensaje_conversacion("usuario", mensaje)
+        guardar_mensaje_conversacion("asistente", respuesta)
+        compactar_contexto_conversacional()
+    return respuesta
+
+
 # ==========================================================
 # INICIO
 # ==========================================================
@@ -16695,73 +16718,24 @@ print("Escribí 'salir' para terminar.")
 print()
 
 
-while True:
-
-    mensaje = input(
-        "Vos: "
-    ).strip()
-
-    if not mensaje:
-        continue
-
-    if mensaje.lower() == "salir":
-
-        print()
-        print(
-            "Hermes: Hasta luego, Leo."
-        )
-
-        break
-
-    try:
-
-        respuesta = consultar_hermes(
-            mensaje
-        )
-
-        if not es_comando_mantenimiento_contexto(
-            mensaje
-        ):
-            guardar_mensaje_conversacion(
-                "usuario",
-                mensaje,
-            )
-
-            guardar_mensaje_conversacion(
-                "asistente",
-                respuesta,
-            )
-
-            compactar_contexto_conversacional()
-
-        print()
-        print(
-            f"Hermes: {respuesta}"
-        )
-        print()
-
-    except requests.exceptions.RequestException as error:
-
-        print()
-        print(
-            "Hermes: Tuve un problema "
-            "comunicándome con mi "
-            "modelo local."
-        )
-
-        print(
-            f"Error técnico: {error}"
-        )
-        print()
-
-    except Exception as error:
-
-        print()
-        print(
-            "Hermes: Ocurrió un error."
-        )
-
-        print(
-            f"Error técnico: {error}"
-        )
-        print()
+try:
+    while True:
+        try:
+            mensaje = input("Vos: ").strip()
+            if not mensaje:
+                continue
+            if not voz.turno(mensaje, procesar_turno_texto):
+                print("\nHermes: Hasta luego, Leo.")
+                break
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print("\nOperación cancelada. Escribí 'salir' para terminar.")
+        except requests.exceptions.RequestException as error:
+            print("\nHermes: Tuve un problema comunicándome con mi modelo local.")
+            print(f"Error técnico: {error}\n")
+        except Exception as error:
+            print("\nHermes: Ocurrió un error.")
+            print(f"Error técnico: {error}\n")
+finally:
+    voz.cerrar()

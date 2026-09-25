@@ -1,0 +1,2 @@
+# Dependencias opcionales en el entorno de Hermes; Supertonic usa su .venv externo, sin dependencias MLX.
+sounddevice>=0.5,<1

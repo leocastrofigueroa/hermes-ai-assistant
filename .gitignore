@@ -4,3 +4,12 @@ __pycache__/
 hermes.db
 .DS_Store
 .env
+
+# Artefactos locales; no incluir en cambios de código.
+recordatorios.log
+hermes-calendario.ics
+*.wav
+*.mp3
+*.safetensors
+*.gguf
+ggml-*.bin
